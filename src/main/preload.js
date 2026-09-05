@@ -15,13 +15,15 @@ contextBridge.exposeInMainWorld('api', {
   openDir:  ()        => ipcRenderer.invoke('dialog:openDir'),
   openUrl:  (url)     => ipcRenderer.invoke('shell:openExternal', url),
 
-  // Google Sheets
-  testSheets:  () => ipcRenderer.invoke('sheets:test'),
-  fetchSheets: () => ipcRenderer.invoke('sheets:fetch'),
+  // Google Sheets — single channel
+  testSheets:  (channelId) => ipcRenderer.invoke('sheets:test', channelId),
+  fetchSheets: (channelId) => ipcRenderer.invoke('sheets:fetch', channelId),
+  // Google Sheets — tất cả channels
+  fetchAllSheets: () => ipcRenderer.invoke('sheets:fetchAll'),
 
   // Upload control
-  runNow:  () => ipcRenderer.invoke('upload:runNow'),
-  stopRun: () => ipcRenderer.invoke('upload:stop'),
+  runNow:  (channelId) => ipcRenderer.invoke('upload:runNow', channelId),
+  stopRun: ()          => ipcRenderer.invoke('upload:stop'),
 
   // Scheduler
   startScheduler: () => ipcRenderer.invoke('scheduler:start'),
