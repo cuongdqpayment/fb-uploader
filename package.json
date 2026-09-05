@@ -1,0 +1,49 @@
+{
+  "name": "fb-video-uploader",
+  "version": "1.0.0",
+  "description": "Tự động upload video lên Facebook Page từ Google Sheet",
+  "main": "src/main/index.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "build": "vite build && electron-builder",
+    "build:mac": "vite build && electron-builder --mac",
+    "build:win": "vite build && electron-builder --win",
+    "build:linux": "vite build && electron-builder --linux"
+  },
+  "dependencies": {
+    "electron-store": "^8.1.0",
+    "googleapis": "^140.0.0",
+    "node-cron": "^3.0.3",
+    "puppeteer-core": "^22.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^8.2.2",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^5.3.4",
+    "vite-plugin-electron": "^0.28.7",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.h2dev.fb-video-uploader",
+    "productName": "FB Video Uploader",
+    "directories": { "output": "dist-app" },
+    "files": ["dist/**/*", "src/main/**/*", "node_modules/**/*"],
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Utility"
+    }
+  }
+}

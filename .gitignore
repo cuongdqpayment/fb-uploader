@@ -1,0 +1,71 @@
+# ─── Dependencies ───────────────────────────────────────────
+node_modules/
+.pnp
+.pnp.js
+
+# ─── Build outputs ──────────────────────────────────────────
+dist/
+dist-app/
+out/
+build/
+release/
+
+# ─── Vite cache ─────────────────────────────────────────────
+.vite/
+vite.config.js.timestamp-*
+
+# ─── Electron builder cache ──────────────────────────────────
+.electron-builder/
+
+# ─── Environment & secrets ───────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ─── Google Service Account JSON (sensitive!) ────────────────
+assets/*.json
+# Nếu để file .json ở thư mục khác, thêm vào đây:
+# service-account.json
+# *-credentials.json
+
+# ─── Electron store (config người dùng) ─────────────────────
+# Không commit config local của từng máy
+*.db
+*.sqlite
+
+# ─── Logs ────────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# ─── OS files ────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ─── IDE / Editor ────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ─── Testing ─────────────────────────────────────────────────
+coverage/
+.nyc_output/
+
+# ─── Puppeteer downloaded Chrome ─────────────────────────────
+.local-chromium/
+.cache/puppeteer/
