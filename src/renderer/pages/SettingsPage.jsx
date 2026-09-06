@@ -166,8 +166,36 @@ export default function SettingsPage() {
 
           <div className="card">
             <div className="card-title" style={{ marginBottom: 16 }}>🌐 Chrome Browser</div>
+
+            {/* Script khởi động Chrome — ưu tiên dùng thay chromePath */}
             <div className="form-group">
-              <label className="form-label">Đường dẫn Chrome</label>
+              <label className="form-label">Script khởi động Chrome</label>
+              <div className="input-row">
+                <input
+                  type="text"
+                  value={cfg.chromeStartScript || ''}
+                  onChange={e => setGlobal('chromeStartScript', e.target.value)}
+                  placeholder="~/start-fb-uploader.sh"
+                />
+                <button className="btn btn-ghost"
+                  onClick={() => pickFile(
+                    [{ name: 'Shell Script', extensions: ['sh', '*'] }],
+                    v => setGlobal('chromeStartScript', v)
+                  )}>
+                  Chọn
+                </button>
+              </div>
+              <p className="form-hint">
+                App tự gọi script này nếu Chrome chưa chạy trước khi upload.<br />
+                Script phải khởi động Chrome với <code>--remote-debugging-port=9222</code>.<br />
+                VD: <code>~/start-fb-uploader.sh</code>
+              </p>
+            </div>
+
+            <div className="divider" />
+
+            <div className="form-group">
+              <label className="form-label">Đường dẫn Chrome (fallback)</label>
               <div className="input-row">
                 <input type="text" value={cfg.chromePath || ''} readOnly placeholder="Tự động tìm..." />
                 <button className="btn btn-ghost"
@@ -177,10 +205,12 @@ export default function SettingsPage() {
                 </button>
               </div>
               <p className="form-hint">
+                Chỉ dùng khi không có script. Để trống để tự động tìm.<br />
                 Ubuntu: <code>/usr/bin/google-chrome</code> ·
                 Mac: <code>/Applications/Google Chrome.app/Contents/MacOS/Google Chrome</code>
               </p>
             </div>
+
             <div className="divider" />
             <div className="toggle-row">
               <div className="toggle-info">

@@ -18,6 +18,7 @@ const store = new Store({
     // Global settings
     serviceAccountPath: '',
     chromePath: '',
+    chromeStartScript: '', // Script khởi động Chrome (VD: ~/start-fb-uploader.sh)
     scheduleCron: '*/15 * * * *',
     delayBetween: 15,
     headless: false,
@@ -80,7 +81,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', async () => {
   if (browser) await browser.close().catch(() => {})
-  if (cronJob) cronJob.destroy()
+  if (cronJob) { try { cronJob.stop() } catch (_) {} }
 })
 
 // ─── Helper: send log to renderer (with timestamp) ──────────
@@ -205,35 +206,55 @@ async function fetchPendingRowsForChannel(channel) {
 
 async function updateRowStatusForChannel(channel, rowIndex, status, fbVideoId = '') {
   const sheets = await getSheetsClient()
+  // Tạo link Reels nếu có ID thật (không phải UNKNOWN_xxx)
+  const reelLink = fbVideoId && !fbVideoId.startsWith('UNKNOWN')
+    ? `https://www.facebook.com/reel/${fbVideoId}`
+    : ''
+
   await sheets.spreadsheets.values.update({
     spreadsheetId: channel.sheetId,
-    range: `${channel.sheetTab}!G${rowIndex}:H${rowIndex}`,
+    // G = status, H = fb_video_id, I = reel_link
+    range: `${channel.sheetTab}!G${rowIndex}:I${rowIndex}`,
     valueInputOption: 'USER_ENTERED',
-    requestBody: { values: [[status, fbVideoId]] },
+    requestBody: { values: [[status, fbVideoId, reelLink]] },
   })
 }
 
 // ─── IPC: Scheduler ──────────────────────────────────────────
 ipcMain.handle('scheduler:start', () => {
   const cronExpr = store.get('scheduleCron')
-  if (cronJob) cronJob.destroy()
+  // node-cron dùng .stop() không phải .destroy()
+  if (cronJob) { try { cronJob.stop() } catch (_) {} }
   cronJob = cron.schedule(cronExpr, () => {
-    if (!isRunning) runUploadQueue()
+    // force=false: CHECK giờ scheduled_at, chỉ đăng khi đến giờ
+    if (!isRunning) runUploadQueue(false)
   })
-  sendLog(`Scheduler started: ${cronExpr}`, 'ok')
+  sendLog(`Scheduler started: ${cronExpr} (check giờ đăng)`, 'ok')
   return { ok: true }
 })
 
 ipcMain.handle('scheduler:stop', () => {
-  if (cronJob) { cronJob.destroy(); cronJob = null }
+  if (cronJob) {
+    try { cronJob.stop() } catch (_) {}
+    cronJob = null
+  }
   sendLog('Scheduler stopped', 'warn')
   return { ok: true }
 })
 
 // ─── IPC: Manual run ─────────────────────────────────────────
 ipcMain.handle('upload:runNow', async (_, channelId) => {
+  // force=true: BỎ QUA check giờ, đăng ngay lập tức
   if (isRunning) return { ok: false, error: 'Đang chạy rồi' }
-  runUploadQueue(true, channelId || null) // force=true, optional channelId
+  runUploadQueue(true, channelId || null)
+  return { ok: true }
+})
+
+ipcMain.handle('upload:runScheduled', async (_, channelId) => {
+  // force=false: CHECK giờ scheduled_at — chỉ đăng khi đến giờ
+  if (isRunning) return { ok: false, error: 'Đang chạy rồi' }
+  sendLog('Chạy theo lịch — chỉ đăng video đến giờ...', 'info')
+  runUploadQueue(false, channelId || null)
   return { ok: true }
 })
 
@@ -353,19 +374,57 @@ async function runUploadQueue(force = false, targetChannelId = null) {
   sendLog('Hoàn tất tất cả kênh.', 'ok')
 }
 
-// ─── Puppeteer: Launch browser ───────────────────────────────
+// ─── Puppeteer: Launch/connect browser ───────────────────────
 async function launchBrowser() {
-  // Thử connect vào Chrome đang chạy trước
+  const { execSync, exec } = require('child_process')
+
+  // Bước 1: Kiểm tra Chrome đang chạy với debug port chưa
+  const isAlive = await checkChromeAlive()
+
+  if (!isAlive) {
+    // Bước 2: Chạy script khởi động nếu có cấu hình
+    const startScript = store.get('chromeStartScript') || ''
+    const scriptPath = startScript.replace(/^~/, process.env.HOME || '')
+
+    if (scriptPath && fs.existsSync(scriptPath)) {
+      sendLog(`Chrome chưa chạy — gọi script: ${startScript}`, 'info')
+      try {
+        // Chạy script nền (không block)
+        exec(`bash "${scriptPath}"`, (err) => {
+          if (err) sendLog(`Script error: ${err.message}`, 'warn')
+        })
+
+        // Chờ Chrome khởi động + Facebook load (tối đa 30s)
+        sendLog('Chờ Chrome khởi động...', 'info')
+        const ready = await waitForChrome(30000)
+        if (ready) {
+          sendLog('Chrome đã sẵn sàng ✓', 'ok')
+        } else {
+          sendLog('Chrome khởi động chậm — thử kết nối tiếp...', 'warn')
+        }
+      } catch (e) {
+        sendLog(`Lỗi chạy script: ${e.message}`, 'warn')
+      }
+    } else if (startScript) {
+      sendLog(`⚠ Script không tồn tại: ${startScript}`, 'warn')
+      sendLog('Tiếp tục không có script...', 'warn')
+    } else {
+      sendLog('Chrome chưa chạy và chưa cấu hình script khởi động', 'warn')
+      sendLog('Vào Cấu hình → Chrome → Script khởi động để cài đặt', 'warn')
+    }
+  }
+
+  // Bước 3: Kết nối vào Chrome qua debug port
   try {
     const browser = await puppeteer.connect({
       browserURL: 'http://localhost:9222',
       defaultViewport: null,
     })
-    sendLog('Đã kết nối vào Chrome đang chạy ✓', 'ok')
+    sendLog('Đã kết nối vào Chrome (port 9222) ✓', 'ok')
     return browser
   } catch (_) {
-    // Không có Chrome đang chạy → mở mới
-    sendLog('Không thấy Chrome đang chạy, mở Chrome mới...', 'warn')
+    // Fallback: mở Chrome mới bằng Puppeteer (không có session Facebook)
+    sendLog('Không kết nối được port 9222 — mở Chrome mới (cần login Facebook)', 'warn')
     const execPath = store.get('chromePath') || findChrome()
     return await puppeteer.launch({
       executablePath: execPath,
@@ -378,6 +437,36 @@ async function launchBrowser() {
       ],
     })
   }
+}
+
+// Kiểm tra Chrome debug port có active không
+async function checkChromeAlive() {
+  try {
+    const http = require('http')
+    return await new Promise((resolve) => {
+      const req = http.get('http://localhost:9222/json/version', (res) => {
+        resolve(res.statusCode === 200)
+      })
+      req.on('error', () => resolve(false))
+      req.setTimeout(2000, () => { req.destroy(); resolve(false) })
+    })
+  } catch {
+    return false
+  }
+}
+
+// Chờ Chrome debug port active (poll mỗi 2s)
+async function waitForChrome(timeoutMs = 30000) {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    if (await checkChromeAlive()) return true
+    const elapsed = Math.round((Date.now() - start) / 1000)
+    if (elapsed % 5 === 0 && elapsed > 0) {
+      sendLog(`[${elapsed}s] Chờ Chrome port 9222...`, 'info')
+    }
+    await sleep(2000)
+  }
+  return false
 }
 
 // Tìm Chrome mặc định theo OS
@@ -606,37 +695,148 @@ async function uploadVideoToFacebook(browser, row, channel) {
   sendLog(`Tìm nút "Đăng" (sau delay ${d3}ms)...`, 'info')
   await waitForButtonActive(page, ['Đăng', 'Publish', 'Share'])
   await humanDelay(500, 1500)
+
+  // Snapshot ID hiện có TRƯỚC khi đăng để so sánh sau
+  sendLog('Snapshot danh sách reel hiện có...', 'info')
+  const existingReelIds = await page.evaluate(() => {
+    const links = [...document.querySelectorAll('a[href*="/reel/"]')]
+    return links.map(l => {
+      const m = l.href.match(/\/reel\/(\d{10,18})/)
+      return m ? m[1] : null
+    }).filter(Boolean)
+  })
+  sendLog(`Snapshot: ${existingReelIds.length} reels hiện có`, 'info')
+
+  // Click "Đăng"
   const published = await clickButtonByText(page, ['Đăng', 'Publish', 'Share'])
   if (!published) {
     sendLog('Không tìm thấy nút "Đăng" — kiểm tra Chrome thủ công', 'warn')
   }
 
-  sendLog(`Chờ afterPublish (${DELAY.afterPublish}ms) — Facebook xử lý...`, 'info')
-  await sleep(DELAY.afterPublish)
+  // ── Bước 10: Chờ 5 phút rồi refresh lấy ID thật ──
+  // Facebook cần ~3-5 phút để xử lý và hiển thị Reel mới
+  // Cách đáng tin nhất: refresh trang, tìm reel MỚI (không trong snapshot)
+  // có view count thấp nhất (= vừa đăng)
+  const waitMinutes = DELAY.waitAfterPublishMin || 5
+  sendLog(`Đã đăng! Chờ ${waitMinutes} phút để Facebook xử lý Reel...`, 'ok')
 
-  const finalUrl = page.url()
-  const match = finalUrl.match(/\/(\d{10,})/)
-  const videoId = match ? match[1] : `fb_${Date.now()}`
+  for (let s = waitMinutes * 60; s > 0; s -= 30) {
+    await sleep(30000)
+    sendLog(`Còn ${s - 30}s trước khi refresh lấy link...`, 'info')
+    if (s <= 30) break
+  }
 
-  sendLog('✓ Đã đăng Reels! Tab Facebook vẫn mở để kiểm tra.', 'ok')
-  return videoId
+  // Refresh trang Reels (tối đa refreshAttempts lần, mỗi lần cách refreshInterval)
+  let realVideoId = null
+  const maxRefresh = DELAY.refreshAttempts || 3
+  const refreshInterval = DELAY.refreshInterval || 60000 // 60s mỗi lần nếu chưa thấy
+
+  for (let attempt = 1; attempt <= maxRefresh; attempt++) {
+    sendLog(`[Refresh ${attempt}/${maxRefresh}] Reload trang Reels...`, 'info')
+    await page.goto(reelsUrl, { waitUntil: 'networkidle2', timeout: 30000 })
+      .catch(() => page.reload({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {}))
+    await sleep(4000)
+
+    // Lấy tất cả reel link + view count trên trang
+    const reelsData = await page.evaluate(() => {
+      const results = []
+      const links = [...document.querySelectorAll('a[href*="/reel/"]')]
+      links.forEach(link => {
+        const m = link.href.match(/\/reel\/(\d{10,17})/) // Reel ID thật: 13-17 chữ số
+        if (!m) return
+        const id = m[1]
+
+        // Tìm view count gần link này
+        // Facebook thường hiển thị "X lượt xem" hoặc số views dạng "1,2N"
+        const container = link.closest('[data-visualcompletion]') ||
+                         link.parentElement?.closest('div') ||
+                         link.parentElement
+
+        let viewText = ''
+        if (container) {
+          const allText = container.innerText || ''
+          // Tìm số views: dạng "290 lượt xem", "1,2 N lượt xem", "1.2K views"
+          const viewMatch = allText.match(/(\d[\d.,]*\s*[KMkm]?)\s*(lượt xem|views?)/i)
+          viewText = viewMatch ? viewMatch[0] : ''
+        }
+
+        results.push({ id, viewText, href: link.href })
+      })
+      // Dedup theo id
+      return [...new Map(results.map(r => [r.id, r])).values()]
+    })
+
+    sendLog(`[Refresh ${attempt}] Thấy ${reelsData.length} reels trên trang`, 'info')
+
+    // Lọc ID mới (không có trong snapshot)
+    const newReels = reelsData.filter(r => !existingReelIds.includes(r.id))
+
+    if (newReels.length > 0) {
+      sendLog(`Tìm thấy ${newReels.length} reel mới: ${newReels.map(r => r.id).join(', ')}`, 'ok')
+
+      // Ưu tiên: reel có view thấp nhất (vừa đăng)
+      // Parse view count để sort: "290" < "1,2N" < "5,6N"
+      const parseViews = (txt) => {
+        if (!txt) return Infinity // không có view text → có thể đang xử lý
+        const clean = txt.replace(/[,\s]/g, '').toLowerCase()
+        const num = parseFloat(clean)
+        if (isNaN(num)) return Infinity
+        if (clean.includes('k')) return num * 1000
+        if (clean.includes('m')) return num * 1000000
+        if (clean.includes('n')) return num * 1000 // "N" tiếng Việt = nghìn
+        return num
+      }
+
+      newReels.sort((a, b) => parseViews(a.viewText) - parseViews(b.viewText))
+      realVideoId = newReels[0].id
+
+      sendLog(`Chọn reel mới nhất (view thấp nhất): ID=${realVideoId}`, 'ok')
+      if (newReels[0].viewText) {
+        sendLog(`View count: ${newReels[0].viewText}`, 'info')
+      }
+      break
+    }
+
+    sendLog(`[Refresh ${attempt}] Chưa thấy reel mới — thử lại sau ${refreshInterval/1000}s...`, 'warn')
+    if (attempt < maxRefresh) await sleep(refreshInterval)
+  }
+
+  if (!realVideoId) {
+    sendLog('⚠️ Không tìm được ID sau refresh — video có thể đang xử lý', 'warn')
+    sendLog(`Xem thủ công tại: ${reelsUrl}`, 'warn')
+    realVideoId = `UNKNOWN_${Date.now()}`
+  }
+
+  const reelLink = realVideoId.startsWith('UNKNOWN')
+    ? `Chưa xác định — xem tại: ${reelsUrl}`
+    : `https://www.facebook.com/reel/${realVideoId}`
+
+  sendLog(`✓ Đã đăng Reels thành công!`, 'ok')
+  sendLog(`📎 Link video: ${reelLink}`, 'ok')
+  return realVideoId
 }
 
 // ─── DELAY CONFIG (ms) — điều chỉnh ở đây nếu cần ──────────
 const DELAY = {
-  afterFileSelect:   30000, // sau khi chọn file, trước khi bấm Escape
-  afterEscape:       3000,  // sau Escape, trước khi chờ upload
-  beforeNext1Min:    2000,  // delay tối thiểu trước "Tiếp" lần 1
-  beforeNext1Max:    4500,  // delay tối đa trước "Tiếp" lần 1
-  afterNext1:        4500,  // sau "Tiếp" lần 1, chờ màn chỉnh sửa load
-  beforeNext2Min:    2500,  // delay tối thiểu trước "Tiếp" lần 2
-  beforeNext2Max:    5000,  // delay tối đa trước "Tiếp" lần 2
-  afterNext2:        5000,  // sau "Tiếp" lần 2, chờ màn cài đặt load
-  beforeDescription: 5000,  // trước khi điền mô tả
-  afterDescription:  5000,  // sau khi điền mô tả
-  beforePublishMin:  3500,  // delay tối thiểu trước "Đăng"
-  beforePublishMax:  5000,  // delay tối đa trước "Đăng"
-  afterPublish:      6000,  // sau khi bấm "Đăng", chờ Facebook xử lý
+  afterFileSelect:        30000, // sau khi chọn file, trước khi bấm Escape
+  afterEscape:            3000,  // sau Escape, trước khi chờ upload
+  beforeNext1Min:         2000,  // delay tối thiểu trước "Tiếp" lần 1
+  beforeNext1Max:         4500,  // delay tối đa trước "Tiếp" lần 1
+  afterNext1:             4500,  // sau "Tiếp" lần 1, chờ màn chỉnh sửa load
+  beforeNext2Min:         2500,  // delay tối thiểu trước "Tiếp" lần 2
+  beforeNext2Max:         5000,  // delay tối đa trước "Tiếp" lần 2
+  afterNext2:             5000,  // sau "Tiếp" lần 2, chờ màn cài đặt load
+  beforeDescription:      5000,  // trước khi điền mô tả
+  afterDescription:       5000,  // sau khi điền mô tả
+  beforePublishMin:       3500,  // delay tối thiểu trước "Đăng"
+  beforePublishMax:       5000,  // delay tối đa trước "Đăng"
+  // Timeout chờ Facebook xác nhận "an toàn để đăng"
+  // Tăng nếu hay bị lỗi timeout (Facebook kiểm tra bản quyền lâu)
+  safeToPostTimeoutMin:   20,    // chờ tối đa N phút (mặc định 20 phút)
+  // Sau khi bấm "Đăng": chờ FB xử lý rồi refresh lấy link
+  waitAfterPublishMin:    5,     // chờ N phút trước khi refresh lần đầu
+  refreshAttempts:        3,     // số lần refresh tối đa nếu chưa thấy reel mới
+  refreshInterval:        60000, // chờ 60s giữa mỗi lần refresh
 }
 
 // ─── Helper: delay ngẫu nhiên giống người dùng thật ─────────
@@ -793,7 +993,10 @@ async function clickButtonByText(page, texts) {
 // ─── Helper: chờ Facebook xác nhận "an toàn để đăng" ────────
 // Chờ text "Thước phim của bạn an toàn để đăng!" xuất hiện
 // — đây là tín hiệu chính xác nhất: upload xong + quét bản quyền xong
-async function waitForSafeToPost(page, timeout = 600000) {
+async function waitForSafeToPost(page) {
+  // Đọc timeout từ DELAY config — dễ điều chỉnh không cần sửa code
+  const timeoutMs = (DELAY.safeToPostTimeoutMin || 20) * 60 * 1000
+  const timeoutMin = Math.round(timeoutMs / 60000)
   const start = Date.now()
   let lastLog = 0
 
@@ -815,9 +1018,9 @@ async function waitForSafeToPost(page, timeout = 600000) {
     'Checking',
   ]
 
-  sendLog('Đang chờ Facebook xác nhận an toàn đăng...', 'info')
+  sendLog(`Đang chờ Facebook xác nhận an toàn đăng (timeout ${timeoutMin} phút)...`, 'info')
 
-  while (Date.now() - start < timeout) {
+  while (Date.now() - start < timeoutMs) {
     const result = await page.evaluate((safeMsgs, processMsgs) => {
       const allText = document.body.innerText || ''
 
@@ -852,7 +1055,7 @@ async function waitForSafeToPost(page, timeout = 600000) {
     await sleep(2000)
   }
 
-  throw new Error('Timeout 10 phút: Facebook chưa xác nhận an toàn đăng')
+  throw new Error(`Timeout ${timeoutMin} phút: Facebook chưa xác nhận an toàn đăng`)
 }
 
 // ─── Helper: chờ nút bất kỳ active ──────────────────────────

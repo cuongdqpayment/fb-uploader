@@ -62,12 +62,21 @@ export default function Dashboard({ status }) {
   }
 
   const handleRunAll = async () => {
-    await window.api.runNow(null) // null = tất cả kênh
+    await window.api.runNow(null)
+    setTimeout(fetchAll, 3000)
+  }
+  const handleRunChannel = async (channelId) => {
+    await window.api.runNow(channelId)
     setTimeout(fetchAll, 3000)
   }
 
-  const handleRunChannel = async (channelId) => {
-    await window.api.runNow(channelId)
+  // Chạy theo lịch — check scheduled_at
+  const handleRunAllScheduled = async () => {
+    await window.api.runScheduled(null)
+    setTimeout(fetchAll, 3000)
+  }
+  const handleRunChannelScheduled = async (channelId) => {
+    await window.api.runScheduled(channelId)
     setTimeout(fetchAll, 3000)
   }
 
@@ -100,10 +109,20 @@ export default function Dashboard({ status }) {
           <button className="btn btn-ghost" onClick={fetchAll} disabled={loading}>
             {loading ? '⟳' : '↺'} Làm mới
           </button>
-          {status === 'running'
-            ? <button className="btn btn-danger" onClick={handleStop}>■ Dừng</button>
-            : <button className="btn btn-primary" onClick={handleRunAll}>▶ Chạy tất cả</button>
-          }
+          {status === 'running' ? (
+            <button className="btn btn-danger" onClick={handleStop}>■ Dừng</button>
+          ) : (
+            <>
+              <button className="btn btn-ghost" onClick={handleRunAllScheduled}
+                title="Chỉ đăng video đến giờ scheduled_at">
+                🕐 Theo lịch
+              </button>
+              <button className="btn btn-primary" onClick={handleRunAll}
+                title="Đăng ngay, bỏ qua giờ">
+                ▶ Chạy ngay
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -194,13 +213,18 @@ export default function Dashboard({ status }) {
               )}
             </div>
             {status !== 'running' && activeChannel && (
-              <button
-                className="btn btn-ghost"
-                style={{ fontSize: 12 }}
-                onClick={() => handleRunChannel(activeChannel)}
-              >
-                ▶ Chạy kênh này
-              </button>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button className="btn btn-ghost" style={{ fontSize: 11 }}
+                  onClick={() => handleRunChannelScheduled(activeChannel)}
+                  title="Chỉ đăng video đến giờ scheduled_at">
+                  🕐 Theo lịch
+                </button>
+                <button className="btn btn-ghost" style={{ fontSize: 11 }}
+                  onClick={() => handleRunChannel(activeChannel)}
+                  title="Đăng ngay, bỏ qua giờ">
+                  ▶ Chạy ngay
+                </button>
+              </div>
             )}
           </div>
 

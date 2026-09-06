@@ -22,8 +22,9 @@ contextBridge.exposeInMainWorld('api', {
   fetchAllSheets: () => ipcRenderer.invoke('sheets:fetchAll'),
 
   // Upload control
-  runNow:  (channelId) => ipcRenderer.invoke('upload:runNow', channelId),
-  stopRun: ()          => ipcRenderer.invoke('upload:stop'),
+  runNow:       (channelId) => ipcRenderer.invoke('upload:runNow', channelId),
+  runScheduled: (channelId) => ipcRenderer.invoke('upload:runScheduled', channelId),
+  stopRun: ()               => ipcRenderer.invoke('upload:stop'),
 
   // Scheduler
   startScheduler: () => ipcRenderer.invoke('scheduler:start'),
