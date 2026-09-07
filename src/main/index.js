@@ -189,7 +189,15 @@ async function fetchPendingRowsForChannel(channel) {
   const rows = res.data.values || []
   if (rows.length < 2) return []
 
-  return rows.slice(1).map((row, idx) => ({
+  // Debug: log header + row đầu tiên để kiểm tra cấu trúc
+  if (rows.length >= 1) {
+    sendLog(`[${channel.name}] Header: [${rows[0].join(' | ')}]`, 'info')
+  }
+  if (rows.length >= 2) {
+    sendLog(`[${channel.name}] Row 2: [${rows[1].join(' | ')}]`, 'info')
+  }
+
+  const mapped = rows.slice(1).map((row, idx) => ({
     rowIndex:     idx + 2,
     channelId:    channel.id,
     channelName:  channel.name,
@@ -201,7 +209,14 @@ async function fetchPendingRowsForChannel(channel) {
     description:  row[5] || '',
     status:       row[6] || 'pending',
     fb_video_id:  row[7] || '',
-  })).filter(r => r.status === 'pending' && r.file_name)
+  }))
+
+  // Debug: log status của từng row
+  mapped.forEach(r => {
+    sendLog(`[${channel.name}] Row ${r.rowIndex}: file="${r.file_name}" scheduled="${r.scheduled_at}" status="${r.status}"`, 'info')
+  })
+
+  return mapped.filter(r => r.status === 'pending' && r.file_name)
 }
 
 async function updateRowStatusForChannel(channel, rowIndex, status, fbVideoId = '') {
@@ -269,7 +284,51 @@ ipcMain.handle('upload:stop', async () => {
   return { ok: true }
 })
 
-// ─── Core: Upload queue (multi-channel) ──────────────────────
+// ─── Helper: Parse scheduled_at từ nhiều format Google Sheets ─
+// Google Sheets API có thể trả về nhiều format khác nhau:
+//   '2026-09-06 19:00:00'   ← YYYY-MM-DD HH:MM:SS (đúng nhất)
+//   '9/6/2026 19:00:00'     ← M/D/YYYY (US format, hay gặp)
+//   '6/9/2026 19:00:00'     ← D/M/YYYY (VN format)
+//   '2026-09-06T19:00:00'   ← ISO
+// Tất cả đều hiểu là giờ VN (UTC+7)
+function parseScheduledAt(raw) {
+  if (!raw) return null
+  const s = String(raw).trim()
+  if (!s) return null
+
+  // Format 1: YYYY-MM-DD HH:MM:SS hoặc YYYY-MM-DDTHH:MM:SS
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+    const t = new Date(s.replace(' ', 'T') + (s.includes('+') ? '' : '+07:00'))
+    if (!isNaN(t)) return t
+  }
+
+  // Format 2: M/D/YYYY HH:MM:SS hoặc M/D/YYYY (Google Sheets US locale)
+  // VD: '9/6/2026 19:00:00' → tháng 9, ngày 6
+  const mdyMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/)
+  if (mdyMatch) {
+    const [, m, d, y, hh = '0', mm = '0', ss = '0'] = mdyMatch
+    // Nếu tháng > 12 → thực ra là D/M/YYYY
+    const month = parseInt(m), day = parseInt(d)
+    let dateStr
+    if (month > 12) {
+      // D/M/YYYY: m là ngày, d là tháng
+      dateStr = `${y}-${String(d).padStart(2,'0')}-${String(m).padStart(2,'0')}T${hh.padStart(2,'0')}:${mm}:${ss}+07:00`
+    } else {
+      // Thử M/D/YYYY trước (Google Sheets US default)
+      dateStr = `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}T${hh.padStart(2,'0')}:${mm}:${ss}+07:00`
+    }
+    const t = new Date(dateStr)
+    if (!isNaN(t)) return t
+  }
+
+  // Fallback: để JS tự parse
+  const t = new Date(s)
+  if (!isNaN(t)) return t
+
+  return null // Parse thất bại
+}
+
+// ─── Core: Upload queue — xen kẽ đa kênh theo thời gian ─────
 async function runUploadQueue(force = false, targetChannelId = null) {
   if (isRunning) return
   isRunning = true
@@ -291,10 +350,12 @@ async function runUploadQueue(force = false, targetChannelId = null) {
     browser = await launchBrowser()
     sendLog('Đã kết nối Chrome ✓', 'ok')
 
-    for (const channel of activeChannels) {
-      if (!isRunning) break
-      sendLog(`── Kênh: ${channel.name} ──`, 'info')
+    // ── Bước 1: Gom tất cả video pending từ mọi kênh ──
+    sendLog('Quét tất cả kênh...', 'info')
+    const allDue = []
+    const now = new Date()
 
+    for (const channel of activeChannels) {
       try {
         const rows = await fetchPendingRowsForChannel(channel)
         if (rows.length === 0) {
@@ -302,69 +363,101 @@ async function runUploadQueue(force = false, targetChannelId = null) {
           continue
         }
 
-        const now = new Date()
         const due = rows.filter(r => {
           if (force) return true
           if (!r.scheduled_at) return true
-          const t = new Date(r.scheduled_at.replace(' ', 'T') + '+07:00')
+          const t = parseScheduledAt(r.scheduled_at)
+          if (!t) {
+            sendLog(`[${r.channelName}] ⚠ scheduled_at "${r.scheduled_at}" không parse được → chạy ngay`, 'warn')
+            return true
+          }
           return t <= now
         })
 
         if (due.length === 0) {
-          sendLog(`[${channel.name}] Chưa đến giờ đăng (${rows.length} video đang chờ).`, 'info')
+          // Log thêm thông tin để debug
+          rows.forEach(r => {
+            const t = parseScheduledAt(r.scheduled_at)
+            sendLog(`[${channel.name}] ${r.file_name}: scheduled="${r.scheduled_at}" parsed=${t ? t.toLocaleString('vi-VN', {timeZone:'Asia/Ho_Chi_Minh'}) : 'INVALID'} due=${t ? t <= now : '?'}`, 'info')
+          })
+          sendLog(`[${channel.name}] ${rows.length} video chưa đến giờ — bỏ qua.`, 'info')
           continue
         }
 
-        sendLog(`[${channel.name}] ${due.length} video sẽ upload.`, 'ok')
+        sendLog(`[${channel.name}] ${due.length}/${rows.length} video đến giờ.`, 'ok')
 
-        for (const row of due) {
-          if (!isRunning) break
-
-          sendLog(`[${channel.name}] Xử lý: ${row.file_name}`, 'info')
-          mainWindow?.webContents.send('row:processing', {
-            channelId: channel.id,
-            rowIndex: row.rowIndex,
-          })
-
-          try {
-            const fbVideoId = await uploadVideoToFacebook(browser, row, channel)
-            await updateRowStatusForChannel(channel, row.rowIndex, 'posted', fbVideoId)
-            sendLog(`[${channel.name}] ✓ Đã đăng: ${row.file_name}`, 'ok')
-            mainWindow?.webContents.send('row:done', {
-              channelId: channel.id,
-              rowIndex: row.rowIndex,
-              fbVideoId,
-            })
-          } catch (e) {
-            await updateRowStatusForChannel(channel, row.rowIndex, 'error')
-            sendLog(`[${channel.name}] ✗ Lỗi ${row.file_name}: ${e.message}`, 'error')
-            mainWindow?.webContents.send('row:error', {
-              channelId: channel.id,
-              rowIndex: row.rowIndex,
-              error: e.message,
-            })
-          }
-
-          // Delay giữa các video
-          if (isRunning && due.indexOf(row) < due.length - 1) {
-            const delay = (store.get('delayBetween') || 15) * 1000
-            sendLog(`Nghỉ ${delay / 1000}s...`, 'info')
-            await sleep(delay)
-          }
-        }
-
-        // Delay giữa các kênh
-        if (isRunning && activeChannels.indexOf(channel) < activeChannels.length - 1) {
-          sendLog('Chờ 10s trước kênh tiếp theo...', 'info')
-          await sleep(10000)
-        }
+        // Gắn channel vào mỗi row để dùng sau
+        due.forEach(r => allDue.push({ ...r, _channel: channel }))
 
       } catch (e) {
-        sendLog(`[${channel.name}] Lỗi: ${e.message}`, 'error')
+        sendLog(`[${channel.name}] Lỗi đọc Sheet: ${e.message}`, 'error')
+      }
+    }
+
+    if (allDue.length === 0) {
+      sendLog('Không có video nào đến giờ đăng.', 'info')
+      isRunning = false
+      sendStatus('idle')
+      return
+    }
+
+    // ── Bước 2: Sort theo scheduled_at tăng dần (cũ → mới) ──
+    allDue.sort((a, b) => {
+      const ta = parseScheduledAt(a.scheduled_at)?.getTime() ?? 0
+      const tb = parseScheduledAt(b.scheduled_at)?.getTime() ?? 0
+      return ta - tb
+    })
+
+    sendLog(`Tổng ${allDue.length} video — thứ tự đăng:`, 'ok')
+    allDue.forEach((r, i) => {
+      sendLog(
+        `  ${i + 1}. [${r._channel.name}] ${r.file_name} — ${r.scheduled_at || 'ngay'}`,
+        'info'
+      )
+    })
+
+    // ── Bước 3: Chạy tuần tự theo thứ tự đã sort ──
+    for (let i = 0; i < allDue.length; i++) {
+      if (!isRunning) break
+
+      const row = allDue[i]
+      const channel = row._channel
+
+      sendLog(`── [${i + 1}/${allDue.length}] [${channel.name}] ${row.file_name} ──`, 'info')
+      mainWindow?.webContents.send('row:processing', {
+        channelId: channel.id,
+        rowIndex: row.rowIndex,
+      })
+
+      try {
+        const fbVideoId = await uploadVideoToFacebook(browser, row, channel)
+        await updateRowStatusForChannel(channel, row.rowIndex, 'posted', fbVideoId)
+        sendLog(`[${channel.name}] ✓ Đã đăng: ${row.file_name}`, 'ok')
+        mainWindow?.webContents.send('row:done', {
+          channelId: channel.id,
+          rowIndex: row.rowIndex,
+          fbVideoId,
+        })
+      } catch (e) {
+        await updateRowStatusForChannel(channel, row.rowIndex, 'error')
+        sendLog(`[${channel.name}] ✗ Lỗi ${row.file_name}: ${e.message}`, 'error')
+        mainWindow?.webContents.send('row:error', {
+          channelId: channel.id,
+          rowIndex: row.rowIndex,
+          error: e.message,
+        })
+      }
+
+      // Delay giữa các video (trừ video cuối)
+      if (isRunning && i < allDue.length - 1) {
+        const delay = (store.get('delayBetween') || 15) * 1000
+        sendLog(`Nghỉ ${delay / 1000}s trước video tiếp theo...`, 'info')
+        await sleep(delay)
       }
     }
 
     sendLog('Chrome vẫn mở — kiểm tra kết quả trên Facebook', 'info')
+
   } catch (e) {
     sendLog(`Lỗi nghiêm trọng: ${e.message}`, 'error')
   }
@@ -505,6 +598,25 @@ async function uploadVideoToFacebook(browser, row, channel) {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
       window.chrome = { runtime: {} }
     })
+  }
+
+  // ── Bước 0: Switch sang đúng tài khoản Page ──
+  sendLog(`Switch sang tài khoản: ${channel.name}...`, 'info')
+  await page.goto('https://www.facebook.com', { waitUntil: 'networkidle2', timeout: 30000 })
+  await sleep(2000)
+
+  // Click nút "Chuyển ngay" trên trang Profile của Page
+  const switched = await switchToPage(page, channel)
+
+  // Sau khi switch Facebook reload → lấy lại page reference mới nhất
+  const freshPages = await browser.pages()
+  page = freshPages.find(p => p.url().includes('facebook.com')) || page
+
+  if (switched) {
+    sendLog(`Đã switch sang tài khoản "${channel.name}" ✓`, 'ok')
+    await sleep(2000)
+  } else {
+    sendLog(`Không switch được — tiếp tục với tài khoản hiện tại`, 'warn')
   }
 
   // ── Bước 1: Mở tab Reels của Page ──
@@ -665,14 +777,20 @@ async function uploadVideoToFacebook(browser, row, channel) {
       })
       if (!box) return false
       box.focus()
+
       if (box.tagName === 'TEXTAREA') {
+        // Xóa sạch nội dung cũ trước khi điền
         const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
+        setter.call(box, '')
+        box.dispatchEvent(new Event('input', { bubbles: true }))
+        // Điền nội dung mới
         setter.call(box, text)
         box.dispatchEvent(new Event('input', { bubbles: true }))
         box.dispatchEvent(new Event('change', { bubbles: true }))
       } else {
+        // contenteditable: selectAll + delete trước rồi mới insertText
         document.execCommand('selectAll', false, null)
-        document.execCommand('delete', false, null)
+        document.execCommand('delete', false, null)  // ← xóa hết trước
         document.execCommand('insertText', false, text)
         box.dispatchEvent(new InputEvent('input', {
           bubbles: true, data: text, inputType: 'insertText'
@@ -682,6 +800,17 @@ async function uploadVideoToFacebook(browser, row, channel) {
     }, row.description)
 
     if (filled) {
+      // Thêm bước xóa bằng keyboard thật để chắc chắn không bị duplicate
+      // React có thể restore nội dung cũ sau event, nên dùng Ctrl+A + Delete thật
+      await sleep(300)
+      await page.keyboard.down('Control')
+      await page.keyboard.press('a')
+      await page.keyboard.up('Control')
+      await sleep(100)
+      await page.keyboard.press('Delete')
+      await sleep(100)
+      // Type lại toàn bộ nội dung qua keyboard
+      await page.keyboard.type(row.description, { delay: 0 })
       sendLog('Đã điền mô tả ✓', 'ok')
     } else {
       sendLog('Không tìm thấy ô mô tả, bỏ qua...', 'warn')
@@ -926,7 +1055,206 @@ async function closeFilePicker(page) {
   return true
 }
 
-// ─── Helper: click nút theo text — dùng mouse thật ──────────
+// ─── Helper: Switch sang đúng tài khoản Page ────────────────
+// Logic:
+// 1. Click avatar góc phải → menu xổ xuống
+// 2. Dòng ĐẦU TIÊN trong menu = tài khoản hiện tại
+// 3. Nếu dòng đầu = targetName → đã đúng, không cần switch
+// 4. Nếu không → tìm targetName trong menu → click
+// 5. Nếu không thấy trong menu → mở trang Profile → click "Chuyển ngay"
+async function switchToPage(page, channel) {
+  const targetName = channel.name.trim()
+  const pageProfileUrl = channel.pageUrl.split('?')[0].replace(/\/$/, '')
+
+  try {
+    // ── Bước 1: Click avatar góc phải để mở menu ──
+    sendLog('Click avatar để kiểm tra tài khoản hiện tại...', 'info')
+
+    // Mở trang facebook.com để có header chuẩn
+    const currentUrl = page.url()
+    if (!currentUrl.includes('facebook.com')) {
+      await page.goto('https://www.facebook.com', { waitUntil: 'networkidle2', timeout: 30000 })
+      await sleep(2000)
+    }
+
+    // Click avatar — dùng evaluate để tìm và click
+    const menuOpened = await page.evaluate(() => {
+      // Avatar ở cuối thanh nav header (góc phải)
+      // Facebook render avatar là SVG hoặc img bên trong div role=button
+      const allBtns = [...document.querySelectorAll('[role="button"]')]
+        .filter(el => {
+          const r = el.getBoundingClientRect()
+          return r.top < 70 && r.right > window.innerWidth - 100 &&
+                 r.width > 20 && r.width < 80
+        })
+        .sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right)
+
+      if (allBtns.length > 0) {
+        allBtns[0].click()
+        return true
+      }
+      return false
+    })
+
+    if (!menuOpened) {
+      // Fallback: click tọa độ góc phải cố định
+      const vw = await page.evaluate(() => window.innerWidth)
+      await page.mouse.click(vw - 40, 35)
+      sendLog('Click avatar fallback tọa độ cố định', 'warn')
+    }
+
+    await sleep(2000) // Chờ menu xổ xuống
+
+    // ── Bước 2: Đọc dòng đầu tiên trong menu = tài khoản hiện tại ──
+    const menuInfo = await page.evaluate((targetName) => {
+      // Tìm tất cả span[dir="auto"] trong menu dropdown
+      // Menu thường là [role="menu"] hoặc [role="dialog"] hoặc div popup
+      const popups = [
+        ...document.querySelectorAll('[role="menu"]'),
+        ...document.querySelectorAll('[role="dialog"]'),
+        ...document.querySelectorAll('[role="listbox"]'),
+      ]
+
+      // Nếu không có popup rõ ràng, lấy từ toàn bộ DOM nhưng chỉ phần mới xuất hiện
+      let menuSpans = []
+      for (const popup of popups) {
+        const spans = [...popup.querySelectorAll('span[dir="auto"]')]
+          .map(s => s.textContent.trim())
+          .filter(t => t.length > 1 && t.length < 60)
+        if (spans.length > 0) {
+          menuSpans = spans
+          break
+        }
+      }
+
+      // Fallback: lấy tất cả span visible trong khu vực góc phải màn hình
+      if (menuSpans.length === 0) {
+        menuSpans = [...document.querySelectorAll('span[dir="auto"]')]
+          .filter(el => {
+            const r = el.getBoundingClientRect()
+            const t = el.textContent.trim()
+            return r.right > window.innerWidth * 0.5 &&
+                   r.top > 50 && r.top < 600 &&
+                   t.length > 1 && t.length < 60
+          })
+          .map(s => s.textContent.trim())
+          .filter((v, i, arr) => arr.indexOf(v) === i) // dedup
+      }
+
+      // Dòng đầu tiên = tài khoản hiện tại
+      const currentAccount = menuSpans[0] || ''
+
+      // Tìm targetName trong menu
+      const targetIdx = menuSpans.findIndex(t =>
+        t === targetName ||
+        t.includes(targetName) ||
+        targetName.includes(t)
+      )
+
+      return { currentAccount, menuSpans: menuSpans.slice(0, 8), targetIdx }
+    }, targetName)
+
+    sendLog(`Menu items: [${menuInfo.menuSpans.join(' | ')}]`, 'info')
+    sendLog(`Tài khoản hiện tại (dòng 1): "${menuInfo.currentAccount}"`, 'info')
+
+    // ── Bước 3: Kiểm tra đã đúng tài khoản chưa ──
+    const isAlreadyCorrect =
+      menuInfo.currentAccount === targetName ||
+      menuInfo.currentAccount.includes(targetName) ||
+      targetName.includes(menuInfo.currentAccount)
+
+    if (isAlreadyCorrect && menuInfo.currentAccount.length > 0) {
+      sendLog(`Đã đúng tài khoản "${targetName}" ✓ — đóng menu`, 'ok')
+      await page.keyboard.press('Escape')
+      await sleep(500)
+      return true
+    }
+
+    // ── Bước 4: Tìm targetName trong menu và click ──
+    if (menuInfo.targetIdx >= 0) {
+      sendLog(`Tìm thấy "${targetName}" ở menu[${menuInfo.targetIdx}] → click...`, 'ok')
+
+      const clicked = await page.evaluate((targetName) => {
+        const allSpans = [...document.querySelectorAll('span[dir="auto"]')]
+          .filter(el => {
+            const r = el.getBoundingClientRect()
+            return r.right > window.innerWidth * 0.5 && r.top > 50 && r.top < 600
+          })
+        const span = allSpans.find(s =>
+          s.textContent.trim() === targetName ||
+          s.textContent.trim().includes(targetName) ||
+          targetName.includes(s.textContent.trim())
+        )
+        if (!span) return false
+        span.scrollIntoView({ behavior: 'instant', block: 'center' })
+        span.click()
+        // Click parent cursor:pointer
+        let el = span.parentElement
+        for (let i = 0; i < 6; i++) {
+          if (!el) break
+          if (window.getComputedStyle(el).cursor === 'pointer') { el.click(); break }
+          el = el.parentElement
+        }
+        return true
+      }, targetName)
+
+      if (clicked) {
+        sendLog('Đã click tên kênh trong menu ✓ — chờ switch...', 'ok')
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}),
+          sleep(500),
+        ])
+        await sleep(8000)
+        sendLog(`✓ Switch thành công sang "${targetName}"`, 'ok')
+        return true
+      }
+    }
+
+    // ── Bước 5: Fallback — đóng menu, mở trang Profile, click "Chuyển ngay" ──
+    sendLog(`Không thấy "${targetName}" trong menu — thử "Chuyển ngay"...`, 'warn')
+    await page.keyboard.press('Escape')
+    await sleep(500)
+
+    await page.goto(pageProfileUrl, { waitUntil: 'networkidle2', timeout: 30000 })
+    await sleep(3000)
+
+    const clickedChuyenNgay = await page.evaluate(() => {
+      const allSpans = [...document.querySelectorAll('span')]
+      const span = allSpans.find(s =>
+        s.textContent.trim() === 'Chuyển ngay' ||
+        s.textContent.trim() === 'Switch now'
+      )
+      if (!span) return false
+      span.scrollIntoView({ behavior: 'instant', block: 'center' })
+      span.click()
+      let el = span.parentElement
+      for (let i = 0; i < 6; i++) {
+        if (!el) break
+        if (window.getComputedStyle(el).cursor === 'pointer') { el.click(); break }
+        el = el.parentElement
+      }
+      return true
+    })
+
+    if (clickedChuyenNgay) {
+      sendLog('Đã click "Chuyển ngay" ✓ — chờ switch...', 'ok')
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}),
+        sleep(500),
+      ])
+      await sleep(8000)
+      sendLog(`✓ Switch thành công sang "${targetName}"`, 'ok')
+      return true
+    }
+
+    sendLog(`⚠ Không switch được — tiếp tục với tài khoản hiện tại`, 'warn')
+    return false
+
+  } catch (e) {
+    sendLog(`switchToPage error: ${e.message}`, 'warn')
+    return false
+  }
+}
 async function clickButtonByText(page, texts) {
   // Tìm element và lấy tọa độ để click bằng mouse thật
   const coords = await page.evaluate((texts) => {
