@@ -183,7 +183,11 @@ async function fetchPendingRowsForChannel(channel) {
 
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: channel.sheetId,
-    range: `${channel.sheetTab}!A:H`,
+    range: `${channel.sheetTab}!A:I`,
+    // UNFORMATTED_VALUE trả về serial number cho datetime
+    // tránh hoàn toàn vấn đề D/M vs M/D format
+    valueRenderOption: 'UNFORMATTED_VALUE',
+    dateTimeRenderOption: 'FORMATTED_STRING',
   })
 
   const rows = res.data.values || []
@@ -285,47 +289,52 @@ ipcMain.handle('upload:stop', async () => {
 })
 
 // ─── Helper: Parse scheduled_at từ nhiều format Google Sheets ─
-// Google Sheets API có thể trả về nhiều format khác nhau:
-//   '2026-09-06 19:00:00'   ← YYYY-MM-DD HH:MM:SS (đúng nhất)
-//   '9/6/2026 19:00:00'     ← M/D/YYYY (US format, hay gặp)
-//   '6/9/2026 19:00:00'     ← D/M/YYYY (VN format)
-//   '2026-09-06T19:00:00'   ← ISO
-// Tất cả đều hiểu là giờ VN (UTC+7)
+// Sheet locale VN → trả về D/M/YYYY HH:MM:SS
+// VD: '8/9/2026 4:30:00' = ngày 8, tháng 9
+// Nếu dùng YYYY-MM-DD thì luôn đúng (khuyến nghị dùng format này trong Sheet)
 function parseScheduledAt(raw) {
   if (!raw) return null
   const s = String(raw).trim()
   if (!s) return null
 
-  // Format 1: YYYY-MM-DD HH:MM:SS hoặc YYYY-MM-DDTHH:MM:SS
+  // Format 1: YYYY-MM-DD (an toàn nhất, không ambiguous)
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
     const t = new Date(s.replace(' ', 'T') + (s.includes('+') ? '' : '+07:00'))
     if (!isNaN(t)) return t
   }
 
-  // Format 2: M/D/YYYY HH:MM:SS hoặc M/D/YYYY (Google Sheets US locale)
-  // VD: '9/6/2026 19:00:00' → tháng 9, ngày 6
-  const mdyMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/)
-  if (mdyMatch) {
-    const [, m, d, y, hh = '0', mm = '0', ss = '0'] = mdyMatch
-    // Nếu tháng > 12 → thực ra là D/M/YYYY
-    const month = parseInt(m), day = parseInt(d)
-    let dateStr
-    if (month > 12) {
-      // D/M/YYYY: m là ngày, d là tháng
-      dateStr = `${y}-${String(d).padStart(2,'0')}-${String(m).padStart(2,'0')}T${hh.padStart(2,'0')}:${mm}:${ss}+07:00`
+  // Format 2: D/M/YYYY hoặc M/D/YYYY — Sheet locale VN dùng D/M/YYYY
+  // Xử lý: luôn treat là D/M/YYYY (ngày/tháng) vì Sheet VN
+  const dmyMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/)
+  if (dmyMatch) {
+    const [, d, m, y, hh = '0', mm = '0', ss = '0'] = dmyMatch
+    const day = parseInt(d), month = parseInt(m)
+
+    // Nếu d > 12 → chắc chắn D/M/YYYY → dùng bình thường
+    // Nếu m > 12 → chắc chắn M/D/YYYY (US) → hoán đổi
+    // Nếu cả 2 ≤ 12 → theo locale VN → D/M/YYYY
+    let dayVal = day, monthVal = month
+    if (day > 12 && month <= 12) {
+      // D/M: giữ nguyên
+      dayVal = day; monthVal = month
+    } else if (month > 12 && day <= 12) {
+      // M/D: hoán đổi
+      dayVal = month; monthVal = day
     } else {
-      // Thử M/D/YYYY trước (Google Sheets US default)
-      dateStr = `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}T${hh.padStart(2,'0')}:${mm}:${ss}+07:00`
+      // Ambiguous: theo locale VN = D/M
+      dayVal = day; monthVal = month
     }
+
+    const dateStr = `${y}-${String(monthVal).padStart(2,'0')}-${String(dayVal).padStart(2,'0')}T${String(hh).padStart(2,'0')}:${mm}:${ss}+07:00`
     const t = new Date(dateStr)
     if (!isNaN(t)) return t
   }
 
-  // Fallback: để JS tự parse
+  // Fallback: JS tự parse
   const t = new Date(s)
   if (!isNaN(t)) return t
 
-  return null // Parse thất bại
+  return null
 }
 
 // ─── Core: Upload queue — xen kẽ đa kênh theo thời gian ─────
@@ -765,8 +774,10 @@ async function uploadVideoToFacebook(browser, row, channel) {
   sendLog(`Chờ beforeDescription (${DELAY.beforeDescription}ms)...`, 'info')
   await sleep(DELAY.beforeDescription)
   if (row.description) {
-    sendLog('Điền mô tả thước phim...', 'info')
-    const filled = await page.evaluate((text) => {
+    sendLog('Điền mô tả thước phim (clipboard paste)...', 'info')
+
+    // Focus vào ô mô tả
+    const focused = await page.evaluate(() => {
       const allTargets = [
         ...document.querySelectorAll('textarea'),
         ...document.querySelectorAll('[contenteditable="true"]'),
@@ -777,40 +788,50 @@ async function uploadVideoToFacebook(browser, row, channel) {
       })
       if (!box) return false
       box.focus()
-
+      // Xóa nội dung cũ
       if (box.tagName === 'TEXTAREA') {
-        // Xóa sạch nội dung cũ trước khi điền
         const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
         setter.call(box, '')
         box.dispatchEvent(new Event('input', { bubbles: true }))
-        // Điền nội dung mới
-        setter.call(box, text)
-        box.dispatchEvent(new Event('input', { bubbles: true }))
-        box.dispatchEvent(new Event('change', { bubbles: true }))
       } else {
-        // contenteditable: selectAll + delete trước rồi mới insertText
         document.execCommand('selectAll', false, null)
-        document.execCommand('delete', false, null)  // ← xóa hết trước
-        document.execCommand('insertText', false, text)
-        box.dispatchEvent(new InputEvent('input', {
-          bubbles: true, data: text, inputType: 'insertText'
-        }))
+        document.execCommand('delete', false, null)
       }
       return true
-    }, row.description)
+    })
 
-    if (filled) {
-      // Thêm bước xóa bằng keyboard thật để chắc chắn không bị duplicate
-      // React có thể restore nội dung cũ sau event, nên dùng Ctrl+A + Delete thật
+    if (focused) {
+      // Dùng clipboard API để paste — tránh autocomplete khi type từng ký tự
+      await page.evaluate((text) => {
+        // Ghi text vào clipboard
+        return navigator.clipboard.writeText(text).catch(() => {
+          // Fallback nếu clipboard API không khả dụng
+          const el = document.activeElement
+          if (el && el.tagName === 'TEXTAREA') {
+            const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
+            setter.call(el, text)
+            el.dispatchEvent(new Event('input', { bubbles: true }))
+            el.dispatchEvent(new Event('change', { bubbles: true }))
+          }
+        })
+      }, row.description)
+
       await sleep(300)
+
+      // Ctrl+A để chọn hết (đề phòng còn text cũ), rồi Ctrl+V để paste
       await page.keyboard.down('Control')
       await page.keyboard.press('a')
       await page.keyboard.up('Control')
       await sleep(100)
-      await page.keyboard.press('Delete')
-      await sleep(100)
-      // Type lại toàn bộ nội dung qua keyboard
-      await page.keyboard.type(row.description, { delay: 0 })
+      await page.keyboard.down('Control')
+      await page.keyboard.press('v')
+      await page.keyboard.up('Control')
+      await sleep(500)
+
+      // Đóng bất kỳ dropdown autocomplete nào bằng Escape
+      await page.keyboard.press('Escape')
+      await sleep(300)
+
       sendLog('Đã điền mô tả ✓', 'ok')
     } else {
       sendLog('Không tìm thấy ô mô tả, bỏ qua...', 'warn')
@@ -819,7 +840,7 @@ async function uploadVideoToFacebook(browser, row, channel) {
     await sleep(DELAY.afterDescription)
   }
 
-  // ── Bước 9: Click "Đăng" ──
+  // ── Bước 9: Click "Đăng" (nút xanh, không phải nút "Lưu") ──
   const d3 = await humanDelayLog('beforePublish', DELAY.beforePublishMin, DELAY.beforePublishMax)
   sendLog(`Tìm nút "Đăng" (sau delay ${d3}ms)...`, 'info')
   await waitForButtonActive(page, ['Đăng', 'Publish', 'Share'])
@@ -836,10 +857,40 @@ async function uploadVideoToFacebook(browser, row, channel) {
   })
   sendLog(`Snapshot: ${existingReelIds.length} reels hiện có`, 'info')
 
-  // Click "Đăng"
-  const published = await clickButtonByText(page, ['Đăng', 'Publish', 'Share'])
-  if (!published) {
-    sendLog('Không tìm thấy nút "Đăng" — kiểm tra Chrome thủ công', 'warn')
+  // Click nút "Đăng" — dùng mouse.click tọa độ thật
+  // Facebook layout: [Lưu] [Đăng] — "Đăng" luôn ở bên phải
+  // Cấu trúc: div.html-div > div[role="none"] > span > span "Đăng"
+  // Không có role="button" nên dùng tọa độ
+  const dangCoords = await page.evaluate(() => {
+    const allSpans = [...document.querySelectorAll('span')]
+    // Tìm tất cả span có text chính xác "Đăng"
+    const dangSpans = allSpans.filter(s => s.textContent.trim() === 'Đăng')
+    if (dangSpans.length === 0) return null
+
+    // Lấy span "Đăng" nằm xa nhất bên phải (tránh nhầm "Lưu" bên trái)
+    const visible = dangSpans.filter(s => {
+      const r = s.getBoundingClientRect()
+      return r.width > 0 && r.height > 0 && r.top > 0
+    })
+    if (visible.length === 0) return null
+
+    // Sort theo left giảm dần → rightmost = nút "Đăng"
+    visible.sort((a, b) =>
+      b.getBoundingClientRect().left - a.getBoundingClientRect().left
+    )
+    const span = visible[0]
+    const r = span.getBoundingClientRect()
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+  })
+
+  if (!dangCoords) {
+    sendLog('Không tìm thấy span "Đăng" — kiểm tra Chrome thủ công', 'warn')
+  } else {
+    sendLog(`Click nút "Đăng" tại (${Math.round(dangCoords.x)}, ${Math.round(dangCoords.y)})...`, 'info')
+    await page.mouse.move(dangCoords.x, dangCoords.y, { steps: 5 })
+    await sleep(200)
+    await page.mouse.click(dangCoords.x, dangCoords.y)
+    sendLog('Đã click nút "Đăng" ✓', 'ok')
   }
 
   // ── Bước 10: Chờ 5 phút rồi refresh lấy ID thật ──
