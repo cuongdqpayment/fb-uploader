@@ -639,28 +639,30 @@ async function uploadVideoToFacebook(browser, row, channel) {
 
   // ── Bước 2: Click nút "Tạo thước phim" ──
   sendLog('Tìm nút "Tạo thước phim"...', 'info')
-  const createCoords = await page.evaluate(() => {
+
+  // Đánh dấu element để Puppeteer click trực tiếp
+  const foundCreate = await page.evaluate(() => {
     const spans = [...document.querySelectorAll('span')]
     const span = spans.find(el => el.textContent.trim() === 'Tạo thước phim')
-    if (!span) return null
-    let clickTarget = span
+    if (!span) return false
     let el = span
     for (let i = 0; i < 10; i++) {
       const tag = el.tagName?.toLowerCase()
       const role = el.getAttribute?.('role')
       if (tag === 'a' || tag === 'button' || role === 'button') {
-        clickTarget = el; break
+        el.setAttribute('data-puppeteer-click', 'true'); return true
       }
       if (!el.parentElement) break
       el = el.parentElement
     }
-    const rect = clickTarget.getBoundingClientRect()
-    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+    span.setAttribute('data-puppeteer-click', 'true'); return true
   })
-  if (!createCoords) throw new Error('Không tìm thấy nút "Tạo thước phim"')
-  await page.mouse.move(createCoords.x, createCoords.y, { steps: 5 })
-  await sleep(150)
-  await page.mouse.click(createCoords.x, createCoords.y)
+  if (!foundCreate) throw new Error('Không tìm thấy nút "Tạo thước phim"')
+
+  const createEl = await page.$('[data-puppeteer-click="true"]')
+  if (!createEl) throw new Error('Không lấy được element "Tạo thước phim"')
+  await page.evaluate(el => el.removeAttribute('data-puppeteer-click'), createEl)
+  await createEl.click()
   sendLog('Đã click "Tạo thước phim" ✓', 'ok')
   await sleep(4000)
 
@@ -676,37 +678,39 @@ async function uploadVideoToFacebook(browser, row, channel) {
   sendLog('Chuẩn bị intercept file chooser...', 'info')
   const fileChooserPromise = page.waitForFileChooser({ timeout: 10000 })
 
-  // Tìm tọa độ nút "Tải lên" rồi click bằng mouse thật
+  // Tìm và click nút "Tải lên" bằng element.click() — không dùng tọa độ
   sendLog('Tìm nút "Tải lên"...', 'info')
-  const uploadCoords = await page.evaluate(() => {
+  const foundUpload = await page.evaluate(() => {
     const spans = [...document.querySelectorAll('span')]
     const span = spans.find(el => {
       const t = el.textContent.trim()
       return t === 'Tải lên' || t === 'Thêm video' || t === 'Upload'
     })
-    if (!span) return null
-    let clickTarget = span
+    if (!span) return false
     let el = span
     for (let i = 0; i < 10; i++) {
       const tag = el.tagName?.toLowerCase()
       const role = el.getAttribute?.('role')
       if (tag === 'a' || tag === 'button' || role === 'button') {
-        clickTarget = el; break
+        el.setAttribute('data-puppeteer-click', 'true'); return true
       }
       const style = window.getComputedStyle(el)
-      if (style.cursor === 'pointer') clickTarget = el
+      if (style.cursor === 'pointer') {
+        el.setAttribute('data-puppeteer-click', 'true'); return true
+      }
       if (!el.parentElement) break
       el = el.parentElement
     }
-    const rect = clickTarget.getBoundingClientRect()
-    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+    span.setAttribute('data-puppeteer-click', 'true'); return true
   })
 
-  if (uploadCoords) {
-    await page.mouse.move(uploadCoords.x, uploadCoords.y, { steps: 5 })
-    await sleep(150)
-    await page.mouse.click(uploadCoords.x, uploadCoords.y)
-    sendLog('Đã click "Tải lên" bằng mouse ✓', 'ok')
+  if (foundUpload) {
+    const uploadEl = await page.$('[data-puppeteer-click="true"]')
+    if (uploadEl) {
+      await page.evaluate(el => el.removeAttribute('data-puppeteer-click'), uploadEl)
+      await uploadEl.click()
+      sendLog('Đã click "Tải lên" ✓', 'ok')
+    }
   } else {
     sendLog('Không tìm thấy nút "Tải lên" — thử input trực tiếp', 'warn')
   }
@@ -1307,66 +1311,56 @@ async function switchToPage(page, channel) {
   }
 }
 async function clickButtonByText(page, texts) {
-  // Tìm element và lấy tọa độ để click bằng mouse thật
-  const coords = await page.evaluate((texts) => {
-    for (const text of texts) {
-      // Tìm span có text chính xác
+  for (const text of texts) {
+    // Tìm element, scroll vào view, rồi click bằng JS (không cần visible)
+    const result = await page.evaluate((text) => {
       const allSpans = [...document.querySelectorAll('span')]
-      const span = allSpans.find(el => el.textContent.trim() === text)
-      if (!span) continue
+      const span = allSpans.find(s => s.textContent.trim() === text)
+      if (!span) return { found: false }
 
-      // Lấy element có thể click được gần nhất (leo lên 10 cấp)
-      let clickTarget = span
+      // Leo lên tìm element clickable
       let el = span
+      let clickTarget = span
       for (let i = 0; i < 10; i++) {
-        const tag = el.tagName.toLowerCase()
-        const role = el.getAttribute('role')
-        const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true'
-        if (isDisabled) break
-        // Ưu tiên button/role=button, nhưng cũng chấp nhận div có cursor pointer
+        const tag = el.tagName?.toLowerCase()
+        const role = el.getAttribute?.('role')
+        const disabled = el.disabled || el.getAttribute?.('aria-disabled') === 'true'
+        if (disabled) return { found: false, reason: 'disabled' }
         if (tag === 'button' || role === 'button') {
-          clickTarget = el
-          break
+          clickTarget = el; break
         }
         const style = window.getComputedStyle(el)
-        if (style.cursor === 'pointer') {
-          clickTarget = el
-        }
+        if (style.cursor === 'pointer') clickTarget = el
         if (!el.parentElement) break
         el = el.parentElement
       }
 
-      // Lấy tọa độ center của element
-      const rect = clickTarget.getBoundingClientRect()
-      if (rect.width === 0 || rect.height === 0) {
-        // Element ẩn, thử span gốc
-        const r2 = span.getBoundingClientRect()
-        return { x: r2.left + r2.width / 2, y: r2.top + r2.height / 2, text }
-      }
-      return {
-        x: rect.left + rect.width / 2,
-        y: rect.top + rect.height / 2,
-        text,
-      }
-    }
-    return null
-  }, texts)
+      // Scroll element vào vùng nhìn thấy (quan trọng khi màn hình nhỏ)
+      clickTarget.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' })
 
-  if (!coords) {
-    sendLog(`Không tìm thấy nút [${texts.join('/')}]`, 'warn')
-    return null
+      // Click bằng JS trực tiếp — hoạt động kể cả khi element ngoài viewport
+      clickTarget.click()
+
+      const r = clickTarget.getBoundingClientRect()
+      return {
+        found: true,
+        tag: clickTarget.tagName,
+        x: Math.round(r.left + r.width / 2),
+        y: Math.round(r.top + r.height / 2),
+        inViewport: r.top >= 0 && r.bottom <= window.innerHeight,
+      }
+    }, text)
+
+    if (result?.found) {
+      const viewportInfo = result.inViewport ? 'in viewport' : 'scrolled into view'
+      sendLog(`Đã click "${text}" (JS click, ${viewportInfo}) ✓`, 'ok')
+      await sleep(300)
+      return text
+    }
   }
 
-  sendLog(`Click "${coords.text}" tại (${Math.round(coords.x)}, ${Math.round(coords.y)})...`, 'info')
-
-  // Dùng mouse thật của Puppeteer — giống người dùng click
-  await page.mouse.move(coords.x, coords.y, { steps: 5 })
-  await sleep(100)
-  await page.mouse.click(coords.x, coords.y)
-  await sleep(200)
-
-  sendLog(`Đã click "${coords.text}" ✓`, 'ok')
-  return coords.text
+  sendLog(`Không tìm thấy nút [${texts.join('/')}]`, 'warn')
+  return null
 }
 
 // ─── Helper: chờ Facebook xác nhận "an toàn để đăng" ────────
