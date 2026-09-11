@@ -639,30 +639,24 @@ async function uploadVideoToFacebook(browser, row, channel) {
 
   // ── Bước 2: Click nút "Tạo thước phim" ──
   sendLog('Tìm nút "Tạo thước phim"...', 'info')
-
-  // Đánh dấu element để Puppeteer click trực tiếp
   const foundCreate = await page.evaluate(() => {
-    const spans = [...document.querySelectorAll('span')]
-    const span = spans.find(el => el.textContent.trim() === 'Tạo thước phim')
+    const span = [...document.querySelectorAll('span')]
+      .find(el => el.textContent.trim() === 'Tạo thước phim')
     if (!span) return false
+    span.scrollIntoView({ behavior: 'instant', block: 'center' })
     let el = span
     for (let i = 0; i < 10; i++) {
       const tag = el.tagName?.toLowerCase()
       const role = el.getAttribute?.('role')
-      if (tag === 'a' || tag === 'button' || role === 'button') {
-        el.setAttribute('data-puppeteer-click', 'true'); return true
-      }
+      if (tag === 'a' || tag === 'button' || role === 'button') { el.click(); return true }
+      const style = window.getComputedStyle(el)
+      if (style.cursor === 'pointer') { el.click(); return true }
       if (!el.parentElement) break
       el = el.parentElement
     }
-    span.setAttribute('data-puppeteer-click', 'true'); return true
+    span.click(); return true
   })
   if (!foundCreate) throw new Error('Không tìm thấy nút "Tạo thước phim"')
-
-  const createEl = await page.$('[data-puppeteer-click="true"]')
-  if (!createEl) throw new Error('Không lấy được element "Tạo thước phim"')
-  await page.evaluate(el => el.removeAttribute('data-puppeteer-click'), createEl)
-  await createEl.click()
   sendLog('Đã click "Tạo thước phim" ✓', 'ok')
   await sleep(4000)
 
@@ -673,44 +667,32 @@ async function uploadVideoToFacebook(browser, row, channel) {
     throw new Error(`File không tồn tại: ${filePath}`)
   }
 
-  // Puppeteer waitForFileChooser() chặn native dialog và inject file trực tiếp
-  // Phải set TRƯỚC khi trigger click để bắt được event
+  // waitForFileChooser phải set TRƯỚC khi click để bắt event
   sendLog('Chuẩn bị intercept file chooser...', 'info')
   const fileChooserPromise = page.waitForFileChooser({ timeout: 10000 })
 
-  // Tìm và click nút "Tải lên" bằng element.click() — không dùng tọa độ
+  // Click nút "Tải lên" bằng JS click — không cần visible
   sendLog('Tìm nút "Tải lên"...', 'info')
   const foundUpload = await page.evaluate(() => {
-    const spans = [...document.querySelectorAll('span')]
-    const span = spans.find(el => {
-      const t = el.textContent.trim()
-      return t === 'Tải lên' || t === 'Thêm video' || t === 'Upload'
-    })
+    const span = [...document.querySelectorAll('span')]
+      .find(el => ['Tải lên', 'Thêm video', 'Upload'].includes(el.textContent.trim()))
     if (!span) return false
+    span.scrollIntoView({ behavior: 'instant', block: 'center' })
     let el = span
     for (let i = 0; i < 10; i++) {
       const tag = el.tagName?.toLowerCase()
       const role = el.getAttribute?.('role')
-      if (tag === 'a' || tag === 'button' || role === 'button') {
-        el.setAttribute('data-puppeteer-click', 'true'); return true
-      }
+      if (tag === 'a' || tag === 'button' || role === 'button') { el.click(); return true }
       const style = window.getComputedStyle(el)
-      if (style.cursor === 'pointer') {
-        el.setAttribute('data-puppeteer-click', 'true'); return true
-      }
+      if (style.cursor === 'pointer') { el.click(); return true }
       if (!el.parentElement) break
       el = el.parentElement
     }
-    span.setAttribute('data-puppeteer-click', 'true'); return true
+    span.click(); return true
   })
 
   if (foundUpload) {
-    const uploadEl = await page.$('[data-puppeteer-click="true"]')
-    if (uploadEl) {
-      await page.evaluate(el => el.removeAttribute('data-puppeteer-click'), uploadEl)
-      await uploadEl.click()
-      sendLog('Đã click "Tải lên" ✓', 'ok')
-    }
+    sendLog('Đã click "Tải lên" ✓', 'ok')
   } else {
     sendLog('Không tìm thấy nút "Tải lên" — thử input trực tiếp', 'warn')
   }
@@ -861,40 +843,38 @@ async function uploadVideoToFacebook(browser, row, channel) {
   })
   sendLog(`Snapshot: ${existingReelIds.length} reels hiện có`, 'info')
 
-  // Click nút "Đăng" — dùng mouse.click tọa độ thật
-  // Facebook layout: [Lưu] [Đăng] — "Đăng" luôn ở bên phải
-  // Cấu trúc: div.html-div > div[role="none"] > span > span "Đăng"
-  // Không có role="button" nên dùng tọa độ
-  const dangCoords = await page.evaluate(() => {
+  // Click nút "Đăng" — rightmost span + scrollIntoView + JS click
+  // Facebook layout: [Lưu] [Đăng] — "Đăng" luôn ở bên phải hơn
+  const dangClicked = await page.evaluate(() => {
     const allSpans = [...document.querySelectorAll('span')]
-    // Tìm tất cả span có text chính xác "Đăng"
     const dangSpans = allSpans.filter(s => s.textContent.trim() === 'Đăng')
-    if (dangSpans.length === 0) return null
+    if (dangSpans.length === 0) return false
 
-    // Lấy span "Đăng" nằm xa nhất bên phải (tránh nhầm "Lưu" bên trái)
-    const visible = dangSpans.filter(s => {
-      const r = s.getBoundingClientRect()
-      return r.width > 0 && r.height > 0 && r.top > 0
-    })
-    if (visible.length === 0) return null
-
-    // Sort theo left giảm dần → rightmost = nút "Đăng"
-    visible.sort((a, b) =>
+    // Lấy span "Đăng" nằm xa nhất bên phải → tránh nhầm "Lưu"
+    dangSpans.sort((a, b) =>
       b.getBoundingClientRect().left - a.getBoundingClientRect().left
     )
-    const span = visible[0]
-    const r = span.getBoundingClientRect()
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+    const span = dangSpans[0]
+
+    // Scroll vào vùng nhìn thấy rồi JS click (hoạt động cả khi ngoài viewport)
+    span.scrollIntoView({ behavior: 'instant', block: 'center' })
+
+    // Leo lên tìm clickable parent
+    let el = span
+    for (let i = 0; i < 8; i++) {
+      if (!el.parentElement) break
+      el = el.parentElement
+      const style = window.getComputedStyle(el)
+      if (style.cursor === 'pointer') { el.click(); return true }
+    }
+    span.click()
+    return true
   })
 
-  if (!dangCoords) {
-    sendLog('Không tìm thấy span "Đăng" — kiểm tra Chrome thủ công', 'warn')
+  if (dangClicked) {
+    sendLog('Đã click nút "Đăng" (JS click) ✓', 'ok')
   } else {
-    sendLog(`Click nút "Đăng" tại (${Math.round(dangCoords.x)}, ${Math.round(dangCoords.y)})...`, 'info')
-    await page.mouse.move(dangCoords.x, dangCoords.y, { steps: 5 })
-    await sleep(200)
-    await page.mouse.click(dangCoords.x, dangCoords.y)
-    sendLog('Đã click nút "Đăng" ✓', 'ok')
+    sendLog('Không tìm thấy span "Đăng" — kiểm tra Chrome thủ công', 'warn')
   }
 
   // ── Bước 10: Chờ 5 phút rồi refresh lấy ID thật ──
@@ -1111,204 +1091,240 @@ async function closeFilePicker(page) {
 }
 
 // ─── Helper: Switch sang đúng tài khoản Page ────────────────
-// Logic:
-// 1. Click avatar góc phải → menu xổ xuống
-// 2. Dòng ĐẦU TIÊN trong menu = tài khoản hiện tại
-// 3. Nếu dòng đầu = targetName → đã đúng, không cần switch
-// 4. Nếu không → tìm targetName trong menu → click
-// 5. Nếu không thấy trong menu → mở trang Profile → click "Chuyển ngay"
+// Logic từ giao diện thực tế:
+// 1. Click avatar → menu "Chuyển nhanh trang cá nhân" xuất hiện
+// 2. Item đầu = tài khoản đang active → nếu đúng kênh thì không cần click
+// 3. Kênh ở vị trí 2+ → click aria-label="Chuyển sang {tên}"
+// 4. Không thấy → click "Xem tất cả trang cá nhân" → tìm lại
+// 5. Vẫn không thấy → báo lỗi
 async function switchToPage(page, channel) {
   const targetName = channel.name.trim()
-  const pageProfileUrl = channel.pageUrl.split('?')[0].replace(/\/$/, '')
 
   try {
-    // ── Bước 1: Click avatar góc phải để mở menu ──
-    sendLog('Click avatar để kiểm tra tài khoản hiện tại...', 'info')
+    // ── Bước 0: Bring to front (cần thiết khi chạy ngầm) ──
+    await page.bringToFront()
+    await sleep(500)
 
-    // Mở trang facebook.com để có header chuẩn
-    const currentUrl = page.url()
-    if (!currentUrl.includes('facebook.com')) {
+    // Đảm bảo đang ở facebook.com
+    if (!page.url().includes('facebook.com')) {
       await page.goto('https://www.facebook.com', { waitUntil: 'networkidle2', timeout: 30000 })
       await sleep(2000)
     }
 
-    // Click avatar — dùng evaluate để tìm và click
-    const menuOpened = await page.evaluate(() => {
-      // Avatar ở cuối thanh nav header (góc phải)
-      // Facebook render avatar là SVG hoặc img bên trong div role=button
+    // ── Bước 1: Click avatar mở menu ──
+    sendLog('Click avatar để mở menu kênh...', 'info')
+
+    const avatarClicked = await page.evaluate(() => {
+      // Tìm div[role="button"] ở góc phải header chứa avatar
       const allBtns = [...document.querySelectorAll('[role="button"]')]
         .filter(el => {
           const r = el.getBoundingClientRect()
-          return r.top < 70 && r.right > window.innerWidth - 100 &&
-                 r.width > 20 && r.width < 80
+          return r.top >= 0 && r.top < 70 &&
+                 r.right > window.innerWidth * 0.8 &&
+                 r.width >= 30 && r.width <= 70
         })
         .sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right)
 
       if (allBtns.length > 0) {
         allBtns[0].click()
+        return { ok: true, method: 'header-button' }
+      }
+
+      // Fallback: tìm qua image avatar (fbcdn URL)
+      const imgs = [...document.querySelectorAll('image')]
+        .filter(img => {
+          const href = img.getAttribute('xlink:href') || img.getAttribute('href') || ''
+          const r = img.getBoundingClientRect()
+          return href.includes('fbcdn') && r.top < 70 && r.right > window.innerWidth * 0.7
+        })
+      if (imgs.length > 0) {
+        let el = imgs[0]
+        for (let i = 0; i < 8; i++) {
+          if (!el.parentElement) break
+          el = el.parentElement
+          if (el.getAttribute('role') === 'button') {
+            el.click()
+            return { ok: true, method: 'avatar-image' }
+          }
+        }
+      }
+      return { ok: false }
+    })
+
+    if (!avatarClicked?.ok) {
+      // Fallback tọa độ
+      const vw = await page.evaluate(() => window.innerWidth)
+      await page.mouse.click(vw - 40, 35)
+      sendLog('Click avatar fallback (tọa độ)', 'warn')
+    } else {
+      sendLog(`Avatar clicked (${avatarClicked.method}) ✓`, 'info')
+    }
+
+    await sleep(2000) // Chờ menu render
+
+    // ── Bước 2 + 3: Đọc menu, kiểm tra active và tìm kênh cần chuyển ──
+    const result = await _findAndClickChannel(page, targetName)
+
+    if (result === 'already_active') {
+      sendLog(`Đã đúng kênh "${targetName}" (active) ✓`, 'ok')
+      await page.keyboard.press('Escape')
+      return true
+    }
+
+    if (result === 'clicked') {
+      sendLog(`Đã click kênh "${targetName}" ✓ — chờ switch...`, 'ok')
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}),
+        sleep(500),
+      ])
+      await sleep(6000)
+      sendLog(`✓ Switch thành công sang "${targetName}"`, 'ok')
+      return true
+    }
+
+    // result === 'not_found' → Bước 4: Click "Xem tất cả trang cá nhân"
+    sendLog(`Kênh "${targetName}" chưa thấy trong menu — click "Xem tất cả"...`, 'info')
+
+    const xemTatCaClicked = await page.evaluate(() => {
+      // Dùng aria-label chính xác từ HTML thực tế
+      const btn = document.querySelector('[aria-label="Xem tất cả trang cá nhân"]')
+      if (btn) {
+        btn.scrollIntoView({ behavior: 'instant', block: 'center' })
+        btn.click()
+        return true
+      }
+      // Fallback: tìm qua span text
+      const span = [...document.querySelectorAll('span')]
+        .find(s => s.textContent.trim().includes('Xem tất cả'))
+      if (span) {
+        span.scrollIntoView({ behavior: 'instant', block: 'center' })
+        span.click()
         return true
       }
       return false
     })
 
-    if (!menuOpened) {
-      // Fallback: click tọa độ góc phải cố định
-      const vw = await page.evaluate(() => window.innerWidth)
-      await page.mouse.click(vw - 40, 35)
-      sendLog('Click avatar fallback tọa độ cố định', 'warn')
-    }
-
-    await sleep(2000) // Chờ menu xổ xuống
-
-    // ── Bước 2: Đọc dòng đầu tiên trong menu = tài khoản hiện tại ──
-    const menuInfo = await page.evaluate((targetName) => {
-      // Tìm tất cả span[dir="auto"] trong menu dropdown
-      // Menu thường là [role="menu"] hoặc [role="dialog"] hoặc div popup
-      const popups = [
-        ...document.querySelectorAll('[role="menu"]'),
-        ...document.querySelectorAll('[role="dialog"]'),
-        ...document.querySelectorAll('[role="listbox"]'),
-      ]
-
-      // Nếu không có popup rõ ràng, lấy từ toàn bộ DOM nhưng chỉ phần mới xuất hiện
-      let menuSpans = []
-      for (const popup of popups) {
-        const spans = [...popup.querySelectorAll('span[dir="auto"]')]
-          .map(s => s.textContent.trim())
-          .filter(t => t.length > 1 && t.length < 60)
-        if (spans.length > 0) {
-          menuSpans = spans
-          break
-        }
-      }
-
-      // Fallback: lấy tất cả span visible trong khu vực góc phải màn hình
-      if (menuSpans.length === 0) {
-        menuSpans = [...document.querySelectorAll('span[dir="auto"]')]
-          .filter(el => {
-            const r = el.getBoundingClientRect()
-            const t = el.textContent.trim()
-            return r.right > window.innerWidth * 0.5 &&
-                   r.top > 50 && r.top < 600 &&
-                   t.length > 1 && t.length < 60
-          })
-          .map(s => s.textContent.trim())
-          .filter((v, i, arr) => arr.indexOf(v) === i) // dedup
-      }
-
-      // Dòng đầu tiên = tài khoản hiện tại
-      const currentAccount = menuSpans[0] || ''
-
-      // Tìm targetName trong menu
-      const targetIdx = menuSpans.findIndex(t =>
-        t === targetName ||
-        t.includes(targetName) ||
-        targetName.includes(t)
-      )
-
-      return { currentAccount, menuSpans: menuSpans.slice(0, 8), targetIdx }
-    }, targetName)
-
-    sendLog(`Menu items: [${menuInfo.menuSpans.join(' | ')}]`, 'info')
-    sendLog(`Tài khoản hiện tại (dòng 1): "${menuInfo.currentAccount}"`, 'info')
-
-    // ── Bước 3: Kiểm tra đã đúng tài khoản chưa ──
-    const isAlreadyCorrect =
-      menuInfo.currentAccount === targetName ||
-      menuInfo.currentAccount.includes(targetName) ||
-      targetName.includes(menuInfo.currentAccount)
-
-    if (isAlreadyCorrect && menuInfo.currentAccount.length > 0) {
-      sendLog(`Đã đúng tài khoản "${targetName}" ✓ — đóng menu`, 'ok')
+    if (!xemTatCaClicked) {
+      sendLog(`Không tìm thấy "Xem tất cả trang cá nhân"`, 'warn')
       await page.keyboard.press('Escape')
-      await sleep(500)
+      throw new Error(`Không tìm thấy kênh "${targetName}" để đăng`)
+    }
+
+    sendLog('"Xem tất cả" đã click ✓ — chờ danh sách đầy đủ...', 'ok')
+    await sleep(2000)
+
+    // ── Bước 5: Tìm lại kênh trong danh sách đầy đủ ──
+    const result2 = await _findAndClickChannel(page, targetName)
+
+    if (result2 === 'already_active') {
+      sendLog(`Đã đúng kênh "${targetName}" (active) ✓`, 'ok')
+      await page.keyboard.press('Escape')
       return true
     }
 
-    // ── Bước 4: Tìm targetName trong menu và click ──
-    if (menuInfo.targetIdx >= 0) {
-      sendLog(`Tìm thấy "${targetName}" ở menu[${menuInfo.targetIdx}] → click...`, 'ok')
-
-      const clicked = await page.evaluate((targetName) => {
-        const allSpans = [...document.querySelectorAll('span[dir="auto"]')]
-          .filter(el => {
-            const r = el.getBoundingClientRect()
-            return r.right > window.innerWidth * 0.5 && r.top > 50 && r.top < 600
-          })
-        const span = allSpans.find(s =>
-          s.textContent.trim() === targetName ||
-          s.textContent.trim().includes(targetName) ||
-          targetName.includes(s.textContent.trim())
-        )
-        if (!span) return false
-        span.scrollIntoView({ behavior: 'instant', block: 'center' })
-        span.click()
-        // Click parent cursor:pointer
-        let el = span.parentElement
-        for (let i = 0; i < 6; i++) {
-          if (!el) break
-          if (window.getComputedStyle(el).cursor === 'pointer') { el.click(); break }
-          el = el.parentElement
-        }
-        return true
-      }, targetName)
-
-      if (clicked) {
-        sendLog('Đã click tên kênh trong menu ✓ — chờ switch...', 'ok')
-        await Promise.all([
-          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}),
-          sleep(500),
-        ])
-        await sleep(8000)
-        sendLog(`✓ Switch thành công sang "${targetName}"`, 'ok')
-        return true
-      }
-    }
-
-    // ── Bước 5: Fallback — đóng menu, mở trang Profile, click "Chuyển ngay" ──
-    sendLog(`Không thấy "${targetName}" trong menu — thử "Chuyển ngay"...`, 'warn')
-    await page.keyboard.press('Escape')
-    await sleep(500)
-
-    await page.goto(pageProfileUrl, { waitUntil: 'networkidle2', timeout: 30000 })
-    await sleep(3000)
-
-    const clickedChuyenNgay = await page.evaluate(() => {
-      const allSpans = [...document.querySelectorAll('span')]
-      const span = allSpans.find(s =>
-        s.textContent.trim() === 'Chuyển ngay' ||
-        s.textContent.trim() === 'Switch now'
-      )
-      if (!span) return false
-      span.scrollIntoView({ behavior: 'instant', block: 'center' })
-      span.click()
-      let el = span.parentElement
-      for (let i = 0; i < 6; i++) {
-        if (!el) break
-        if (window.getComputedStyle(el).cursor === 'pointer') { el.click(); break }
-        el = el.parentElement
-      }
-      return true
-    })
-
-    if (clickedChuyenNgay) {
-      sendLog('Đã click "Chuyển ngay" ✓ — chờ switch...', 'ok')
+    if (result2 === 'clicked') {
+      sendLog(`Đã click kênh "${targetName}" trong danh sách đầy đủ ✓`, 'ok')
       await Promise.all([
         page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}),
         sleep(500),
       ])
-      await sleep(8000)
+      await sleep(6000)
       sendLog(`✓ Switch thành công sang "${targetName}"`, 'ok')
       return true
     }
 
-    sendLog(`⚠ Không switch được — tiếp tục với tài khoản hiện tại`, 'warn')
-    return false
+    // ── Bước 6: Vẫn không tìm thấy → báo lỗi ──
+    await page.keyboard.press('Escape')
+    throw new Error(`Không tìm thấy kênh "${targetName}" trong danh sách trang cá nhân`)
 
   } catch (e) {
-    sendLog(`switchToPage error: ${e.message}`, 'warn')
+    sendLog(`switchToPage lỗi: ${e.message}`, 'error')
     return false
   }
+}
+
+// ─── Helper: Tìm và click kênh trong menu hiện tại ───────────
+// Return: 'already_active' | 'clicked' | 'not_found'
+async function _findAndClickChannel(page, targetName) {
+  return await page.evaluate((targetName) => {
+    // Tìm panel "Chuyển nhanh trang cá nhân"
+    // Từ HTML thực tế: div[aria-label="Chuyển nhanh trang cá nhân"][role="list"]
+    const panel = document.querySelector('[aria-label="Chuyển nhanh trang cá nhân"]')
+
+    let items = []
+    if (panel) {
+      // Lấy tất cả item có role="button" trong panel
+      items = [...panel.querySelectorAll('[role="button"]')]
+    } else {
+      // Fallback: lấy tất cả nút có aria-label "Chuyển sang X"
+      items = [...document.querySelectorAll('[role="button"][aria-label^="Chuyển sang"]')]
+    }
+
+    if (items.length === 0) return 'not_found'
+
+    // Kiểm tra item đầu tiên = tài khoản đang active
+    // Từ HTML: aria-label="Chuyển sang Cuong Doan" là item đầu tiên
+    // Item đầu trong panel là tài khoản cá nhân gốc (active)
+    // Các kênh Page là item tiếp theo
+    const firstItem = items[0]
+    const firstLabel = firstItem?.getAttribute('aria-label') || ''
+    const firstName = firstLabel.replace('Chuyển sang ', '').trim()
+
+    // Kiểm tra kênh đang active (item đầu tiên không phải "Chuyện sang" mà là tên kênh)
+    // Nếu item đầu là kênh cần chuyển → đang active rồi
+    if (firstName === targetName ||
+        firstName.includes(targetName) ||
+        targetName.includes(firstName)) {
+      return 'already_active'
+    }
+
+    // Tìm item có aria-label chứa targetName (từ vị trí 2 trở đi)
+    // Dùng aria-label="Chuyển sang {targetName}" chính xác nhất
+    const exactBtn = document.querySelector(
+      `[aria-label="Chuyển sang ${targetName}"]`
+    )
+    if (exactBtn) {
+      exactBtn.scrollIntoView({ behavior: 'instant', block: 'center' })
+      exactBtn.click()
+      return 'clicked'
+    }
+
+    // Partial match: aria-label chứa targetName
+    const partialBtn = items.find(el => {
+      const label = el.getAttribute('aria-label') || ''
+      return label.includes(targetName)
+    })
+    if (partialBtn) {
+      partialBtn.scrollIntoView({ behavior: 'instant', block: 'center' })
+      partialBtn.click()
+      return 'clicked'
+    }
+
+    // Fallback: tìm qua span text trong panel
+    const spans = panel
+      ? [...panel.querySelectorAll('span[dir="auto"]')]
+      : [...document.querySelectorAll('span[dir="auto"]')]
+
+    const span = spans.find(s => {
+      const t = s.textContent.trim()
+      return t === targetName || t.includes(targetName) || targetName.includes(t)
+    })
+    if (span) {
+      span.scrollIntoView({ behavior: 'instant', block: 'center' })
+      // Leo lên tìm role="button" để click
+      let el = span
+      for (let i = 0; i < 8; i++) {
+        if (!el) break
+        if (el.getAttribute('role') === 'button') { el.click(); return 'clicked' }
+        if (window.getComputedStyle(el).cursor === 'pointer') { el.click(); return 'clicked' }
+        el = el.parentElement
+      }
+      span.click()
+      return 'clicked'
+    }
+
+    return 'not_found'
+  }, targetName)
 }
 async function clickButtonByText(page, texts) {
   for (const text of texts) {
@@ -1511,24 +1527,28 @@ async function setSchedule(page, scheduledAt) {
     }) || null
   })
 
-  if (moreBtn.asElement()) {
-    await moreBtn.asElement().click()
-    await sleep(1500)
-  }
+  // moreBtn - dùng JS click
+  await page.evaluate(() => {
+    const btns = [...document.querySelectorAll('[role="button"], button, div')]
+    const btn = btns.find(el => {
+      const text = (el.getAttribute('aria-label') || el.textContent || '').toLowerCase()
+      return text.includes('more') || text.includes('schedule') ||
+             text.includes('option') || el.textContent.trim() === '...'
+    })
+    if (btn) { btn.scrollIntoView({ behavior: 'instant', block: 'center' }); btn.click() }
+  })
+  await sleep(1500)
 
-  // Tìm option "Schedule"
-  const scheduleOption = await page.evaluateHandle(() => {
+  // scheduleOption - dùng JS click
+  await page.evaluate(() => {
     const items = [...document.querySelectorAll('[role="menuitem"], [role="option"], div[tabindex]')]
-    return items.find(el => {
+    const item = items.find(el => {
       const text = (el.textContent || '').toLowerCase()
       return text.includes('schedule') || text.includes('lên lịch')
-    }) || null
+    })
+    if (item) { item.scrollIntoView({ behavior: 'instant', block: 'center' }); item.click() }
   })
-
-  if (scheduleOption.asElement()) {
-    await scheduleOption.asElement().click()
-    await sleep(1500)
-  }
+  await sleep(1500)
 
   // Parse datetime
   const dt = new Date(scheduledAt.replace(' ', 'T') + '+07:00')
@@ -1560,40 +1580,36 @@ async function setSchedule(page, scheduledAt) {
 
   await sleep(500)
 
-  // Confirm schedule
-  const confirmBtn = await page.evaluateHandle(() => {
+  // Confirm schedule - dùng JS click
+  await page.evaluate(() => {
     const btns = [...document.querySelectorAll('[role="button"], button')]
-    return btns.find(b => {
+    const btn = btns.find(b => {
       const text = (b.getAttribute('aria-label') || b.textContent || '').toLowerCase()
       return text.includes('confirm') || text.includes('save') || text.includes('xác nhận')
-    }) || null
+    })
+    if (btn) { btn.scrollIntoView({ behavior: 'instant', block: 'center' }); btn.click() }
   })
-
-  if (confirmBtn.asElement()) {
-    await confirmBtn.asElement().click()
-    await sleep(1000)
-  }
+  await sleep(1000)
 }
 
 async function publish(page, isScheduled) {
-  // Tìm nút publish/schedule
-  const btn = await page.evaluateHandle(() => {
+  // Tìm nút publish/schedule bằng JS click
+  const clicked = await page.evaluate(() => {
     const btns = [...document.querySelectorAll('[role="button"], button')]
-    return btns.find(b => {
+    const btn = btns.find(b => {
       const text = (b.getAttribute('aria-label') || b.textContent || '').toLowerCase()
-      return text.includes('schedule future') ||
-             text.includes('schedule post') ||
-             text.includes('post') ||
-             text.includes('đăng')
-    }) || null
+      return text.includes('schedule future') || text.includes('schedule post') ||
+             text.includes('post') || text.includes('đăng')
+    })
+    if (!btn) return false
+    btn.scrollIntoView({ behavior: 'instant', block: 'center' })
+    btn.click()
+    return true
   })
 
-  if (!btn.asElement()) throw new Error('Không tìm thấy nút Đăng')
-
-  await btn.asElement().click()
+  if (!clicked) throw new Error('Không tìm thấy nút Đăng')
   await sleep(5000)
 
-  // Lấy video ID từ URL hoặc response
   const url = page.url()
   const match = url.match(/\/(\d+)/)
   return match ? match[1] : `fb_${Date.now()}`
