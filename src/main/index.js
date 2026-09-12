@@ -18,7 +18,27 @@ const store = new Store({
     // Global settings
     serviceAccountPath: '',
     chromePath: '',
-    chromeStartScript: '', // Script khởi động Chrome (VD: ~/start-fb-uploader.sh)
+    chromeStartScript: '',
+    logLevel: 'info',        // error | warn | info | debug
+    // Delay config (ms) — điều chỉnh theo tốc độ mạng và máy
+    delay: {
+      afterFileSelect:   2000,
+      afterEscape:       1500,
+      beforeNext1Min:    2000,
+      beforeNext1Max:    4500,
+      afterNext1:        4500,
+      beforeNext2Min:    2500,
+      beforeNext2Max:    5000,
+      afterNext2:        5000,
+      beforeDescription: 5000,
+      afterDescription:  5000,
+      beforePublishMin:  3500,
+      beforePublishMax:  5000,
+      safeToPostTimeoutMin: 20,
+      waitAfterPublishMin:  5,
+      refreshAttempts:      3,
+      refreshInterval:   60000,
+    }, // Script khởi động Chrome (VD: ~/start-fb-uploader.sh)
     scheduleCron: '*/15 * * * *',
     delayBetween: 15,
     headless: false,
@@ -81,11 +101,22 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', async () => {
   if (browser) await browser.close().catch(() => {})
-  if (cronJob) { try { cronJob.stop() } catch (_) {} }
+  if (cronJob) cronJob.destroy()
 })
 
-// ─── Helper: send log to renderer (with timestamp) ──────────
+// ─── Log levels ──────────────────────────────────────────────
+// Levels: error=0, warn=1, ok=2, info=3, debug=4
+const LOG_LEVEL_MAP = { error: 0, warn: 1, ok: 2, info: 3, debug: 4 }
+
+function getLogLevel() {
+  const level = store.get('logLevel') || 'info'
+  return LOG_LEVEL_MAP[level] ?? 3
+}
+
 function sendLog(message, type = 'info') {
+  const msgLevel = LOG_LEVEL_MAP[type] ?? 3
+  if (msgLevel > getLogLevel()) return // Bỏ qua nếu level cao hơn cấu hình
+
   const ts = new Date().toLocaleTimeString('vi-VN', { hour12: false })
   const fullMsg = `[${ts}] ${message}`
   if (mainWindow) {
@@ -94,13 +125,25 @@ function sendLog(message, type = 'info') {
   console.log(`[${type.toUpperCase()}] ${fullMsg}`)
 }
 
+// Debug log — chỉ hiện khi logLevel = 'debug'
+function debugLog(message) {
+  sendLog(message, 'debug')
+}
+
 function sendStatus(status) {
   if (mainWindow) mainWindow.webContents.send('status', status)
 }
 
 // ─── IPC: Config ─────────────────────────────────────────────
 ipcMain.handle('config:get', () => store.store)
-ipcMain.handle('config:set', (_, data) => { store.set(data); return true })
+ipcMain.handle('config:set', (_, data) => {
+  store.set(data)
+  // Nếu logLevel thay đổi → log ngay để xác nhận
+  if (data.logLevel) {
+    sendLog(`Log level đã đổi thành: ${data.logLevel}`, 'info')
+  }
+  return true
+})
 
 ipcMain.handle('dialog:openFile', async (_, filters) => {
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -183,25 +226,13 @@ async function fetchPendingRowsForChannel(channel) {
 
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: channel.sheetId,
-    range: `${channel.sheetTab}!A:I`,
-    // UNFORMATTED_VALUE trả về serial number cho datetime
-    // tránh hoàn toàn vấn đề D/M vs M/D format
-    valueRenderOption: 'UNFORMATTED_VALUE',
-    dateTimeRenderOption: 'FORMATTED_STRING',
+    range: `${channel.sheetTab}!A:H`,
   })
 
   const rows = res.data.values || []
   if (rows.length < 2) return []
 
-  // Debug: log header + row đầu tiên để kiểm tra cấu trúc
-  if (rows.length >= 1) {
-    sendLog(`[${channel.name}] Header: [${rows[0].join(' | ')}]`, 'info')
-  }
-  if (rows.length >= 2) {
-    sendLog(`[${channel.name}] Row 2: [${rows[1].join(' | ')}]`, 'info')
-  }
-
-  const mapped = rows.slice(1).map((row, idx) => ({
+  return rows.slice(1).map((row, idx) => ({
     rowIndex:     idx + 2,
     channelId:    channel.id,
     channelName:  channel.name,
@@ -213,14 +244,7 @@ async function fetchPendingRowsForChannel(channel) {
     description:  row[5] || '',
     status:       row[6] || 'pending',
     fb_video_id:  row[7] || '',
-  }))
-
-  // Debug: log status của từng row
-  mapped.forEach(r => {
-    sendLog(`[${channel.name}] Row ${r.rowIndex}: file="${r.file_name}" scheduled="${r.scheduled_at}" status="${r.status}"`, 'info')
-  })
-
-  return mapped.filter(r => r.status === 'pending' && r.file_name)
+  })).filter(r => r.status === 'pending' && r.file_name)
 }
 
 async function updateRowStatusForChannel(channel, rowIndex, status, fbVideoId = '') {
@@ -242,8 +266,7 @@ async function updateRowStatusForChannel(channel, rowIndex, status, fbVideoId = 
 // ─── IPC: Scheduler ──────────────────────────────────────────
 ipcMain.handle('scheduler:start', () => {
   const cronExpr = store.get('scheduleCron')
-  // node-cron dùng .stop() không phải .destroy()
-  if (cronJob) { try { cronJob.stop() } catch (_) {} }
+  if (cronJob) cronJob.destroy()
   cronJob = cron.schedule(cronExpr, () => {
     // force=false: CHECK giờ scheduled_at, chỉ đăng khi đến giờ
     if (!isRunning) runUploadQueue(false)
@@ -253,25 +276,22 @@ ipcMain.handle('scheduler:start', () => {
 })
 
 ipcMain.handle('scheduler:stop', () => {
-  if (cronJob) {
-    try { cronJob.stop() } catch (_) {}
-    cronJob = null
-  }
+  if (cronJob) { cronJob.destroy(); cronJob = null }
   sendLog('Scheduler stopped', 'warn')
   return { ok: true }
 })
 
 // ─── IPC: Manual run ─────────────────────────────────────────
 ipcMain.handle('upload:runNow', async (_, channelId) => {
-  // force=true: BỎ QUA check giờ, đăng ngay lập tức
   if (isRunning) return { ok: false, error: 'Đang chạy rồi' }
+  // force=true: BỎ QUA check giờ, đăng ngay lập tức
   runUploadQueue(true, channelId || null)
   return { ok: true }
 })
 
 ipcMain.handle('upload:runScheduled', async (_, channelId) => {
-  // force=false: CHECK giờ scheduled_at — chỉ đăng khi đến giờ
   if (isRunning) return { ok: false, error: 'Đang chạy rồi' }
+  // force=false: CHECK giờ scheduled_at — chỉ đăng khi đến giờ
   sendLog('Chạy theo lịch — chỉ đăng video đến giờ...', 'info')
   runUploadQueue(false, channelId || null)
   return { ok: true }
@@ -289,43 +309,31 @@ ipcMain.handle('upload:stop', async () => {
 })
 
 // ─── Helper: Parse scheduled_at từ nhiều format Google Sheets ─
-// Sheet locale VN → trả về D/M/YYYY HH:MM:SS
-// VD: '8/9/2026 4:30:00' = ngày 8, tháng 9
-// Nếu dùng YYYY-MM-DD thì luôn đúng (khuyến nghị dùng format này trong Sheet)
+// Sheet locale VN → D/M/YYYY HH:MM:SS (ngày/tháng)
+// VD: '12/9/2026 6:00:00' = ngày 12, tháng 9, 6h sáng
 function parseScheduledAt(raw) {
   if (!raw) return null
   const s = String(raw).trim()
   if (!s) return null
 
-  // Format 1: YYYY-MM-DD (an toàn nhất, không ambiguous)
+  // Format 1: YYYY-MM-DD (an toàn nhất)
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
     const t = new Date(s.replace(' ', 'T') + (s.includes('+') ? '' : '+07:00'))
     if (!isNaN(t)) return t
   }
 
-  // Format 2: D/M/YYYY hoặc M/D/YYYY — Sheet locale VN dùng D/M/YYYY
-  // Xử lý: luôn treat là D/M/YYYY (ngày/tháng) vì Sheet VN
-  const dmyMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/)
-  if (dmyMatch) {
-    const [, d, m, y, hh = '0', mm = '0', ss = '0'] = dmyMatch
+  // Format 2: D/M/YYYY hoặc M/D/YYYY — Sheet VN dùng D/M/YYYY
+  const match = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/)
+  if (match) {
+    const [, d, m, y, hh = '0', mm = '0', ss = '0'] = match
     const day = parseInt(d), month = parseInt(m)
 
-    // Nếu d > 12 → chắc chắn D/M/YYYY → dùng bình thường
-    // Nếu m > 12 → chắc chắn M/D/YYYY (US) → hoán đổi
-    // Nếu cả 2 ≤ 12 → theo locale VN → D/M/YYYY
+    // Nếu d > 12 → chắc chắn D/M; nếu m > 12 → chắc chắn M/D
+    // Cả hai ≤ 12 → theo locale VN = D/M
     let dayVal = day, monthVal = month
-    if (day > 12 && month <= 12) {
-      // D/M: giữ nguyên
-      dayVal = day; monthVal = month
-    } else if (month > 12 && day <= 12) {
-      // M/D: hoán đổi
-      dayVal = month; monthVal = day
-    } else {
-      // Ambiguous: theo locale VN = D/M
-      dayVal = day; monthVal = month
-    }
+    if (month > 12 && day <= 12) { dayVal = month; monthVal = day }
 
-    const dateStr = `${y}-${String(monthVal).padStart(2,'0')}-${String(dayVal).padStart(2,'0')}T${String(hh).padStart(2,'0')}:${mm}:${ss}+07:00`
+    const dateStr = `${y}-${String(monthVal).padStart(2,'0')}-${String(dayVal).padStart(2,'0')}T${String(hh).padStart(2,'0')}:${mm.padStart(2,'0')}:${ss.padStart(2,'0')}+07:00`
     const t = new Date(dateStr)
     if (!isNaN(t)) return t
   }
@@ -333,7 +341,6 @@ function parseScheduledAt(raw) {
   // Fallback: JS tự parse
   const t = new Date(s)
   if (!isNaN(t)) return t
-
   return null
 }
 
@@ -377,25 +384,29 @@ async function runUploadQueue(force = false, targetChannelId = null) {
           if (!r.scheduled_at) return true
           const t = parseScheduledAt(r.scheduled_at)
           if (!t) {
-            sendLog(`[${r.channelName}] ⚠ scheduled_at "${r.scheduled_at}" không parse được → chạy ngay`, 'warn')
+            sendLog(`[${channel.name}] ⚠ "${r.scheduled_at}" không parse được → chạy ngay`, 'warn')
             return true
           }
-          return t <= now
+          const isDue = t <= now
+          debugLog(`[${channel.name}] ${r.file_name}: ${r.scheduled_at} → due=${isDue}`)
+          return isDue
         })
 
         if (due.length === 0) {
-          // Log thêm thông tin để debug
-          rows.forEach(r => {
-            const t = parseScheduledAt(r.scheduled_at)
-            sendLog(`[${channel.name}] ${r.file_name}: scheduled="${r.scheduled_at}" parsed=${t ? t.toLocaleString('vi-VN', {timeZone:'Asia/Ho_Chi_Minh'}) : 'INVALID'} due=${t ? t <= now : '?'}`, 'info')
-          })
-          sendLog(`[${channel.name}] ${rows.length} video chưa đến giờ — bỏ qua.`, 'info')
+          // Hiển thị video sắp đến giờ gần nhất
+          const next = rows
+            .map(r => ({ ...r, _t: parseScheduledAt(r.scheduled_at) }))
+            .filter(r => r._t && r._t > now)
+            .sort((a, b) => a._t - b._t)[0]
+          if (next) {
+            sendLog(`[${channel.name}] Chưa đến giờ. Sớm nhất: "${next.file_name}" lúc ${next._t.toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}`, 'info')
+          } else {
+            sendLog(`[${channel.name}] Không có video đến giờ.`, 'info')
+          }
           continue
         }
 
         sendLog(`[${channel.name}] ${due.length}/${rows.length} video đến giờ.`, 'ok')
-
-        // Gắn channel vào mỗi row để dùng sau
         due.forEach(r => allDue.push({ ...r, _channel: channel }))
 
       } catch (e) {
@@ -419,10 +430,7 @@ async function runUploadQueue(force = false, targetChannelId = null) {
 
     sendLog(`Tổng ${allDue.length} video — thứ tự đăng:`, 'ok')
     allDue.forEach((r, i) => {
-      sendLog(
-        `  ${i + 1}. [${r._channel.name}] ${r.file_name} — ${r.scheduled_at || 'ngay'}`,
-        'info'
-      )
+      sendLog(`  ${i + 1}. [${r._channel.name}] ${r.file_name} — ${r.scheduled_at || 'ngay'}`, 'info')
     })
 
     // ── Bước 3: Chạy tuần tự theo thứ tự đã sort ──
@@ -592,6 +600,182 @@ function findChrome() {
   return list.find(p => fs.existsSync(p)) || 'google-chrome'
 }
 
+// ─── Helper: Switch sang đúng tài khoản Page ────────────────
+async function switchToPage(page, channel) {
+  const targetName = channel.name.trim()
+
+  try {
+    // Bước 0: bringToFront
+    await page.bringToFront()
+    await sleep(500)
+
+    if (!page.url().includes('facebook.com')) {
+      await page.goto('https://www.facebook.com', { waitUntil: 'networkidle2', timeout: 30000 })
+      await sleep(2000)
+    }
+
+    // Bước 1: Click avatar mở menu
+    sendLog('Click avatar để mở menu kênh...', 'info')
+    const avatarClicked = await page.evaluate(() => {
+      const allBtns = [...document.querySelectorAll('[role="button"]')]
+        .filter(el => {
+          const r = el.getBoundingClientRect()
+          return r.top >= 0 && r.top < 70 &&
+                 r.right > window.innerWidth * 0.8 &&
+                 r.width >= 30 && r.width <= 70
+        })
+        .sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right)
+      if (allBtns.length > 0) { allBtns[0].click(); return { ok: true, method: 'header-button' } }
+
+      const imgs = [...document.querySelectorAll('image')]
+        .filter(img => {
+          const href = img.getAttribute('xlink:href') || img.getAttribute('href') || ''
+          const r = img.getBoundingClientRect()
+          return href.includes('fbcdn') && r.top < 70 && r.right > window.innerWidth * 0.7
+        })
+      if (imgs.length > 0) {
+        let el = imgs[0]
+        for (let i = 0; i < 8; i++) {
+          if (!el.parentElement) break
+          el = el.parentElement
+          if (el.getAttribute('role') === 'button') { el.click(); return { ok: true, method: 'avatar-image' } }
+        }
+      }
+      return { ok: false }
+    })
+
+    if (!avatarClicked?.ok) {
+      const vw = await page.evaluate(() => window.innerWidth)
+      await page.mouse.click(vw - 40, 35)
+      sendLog('Click avatar fallback (tọa độ)', 'warn')
+    }
+    await sleep(2000)
+
+    // Bước 2+3: Tìm và click kênh trong menu
+    const result = await _findAndClickChannel(page, targetName)
+
+    if (result === 'already_active') {
+      sendLog(`Đã đúng kênh "${targetName}" ✓`, 'ok')
+      await page.keyboard.press('Escape')
+      return true
+    }
+
+    if (result === 'clicked') {
+      sendLog(`Đã click kênh "${targetName}" ✓ — chờ switch...`, 'ok')
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}),
+        sleep(500),
+      ])
+      await sleep(6000)
+      sendLog(`✓ Switch thành công sang "${targetName}"`, 'ok')
+      return true
+    }
+
+    // Bước 4: Click "Xem tất cả trang cá nhân"
+    sendLog(`Kênh "${targetName}" chưa thấy — click "Xem tất cả"...`, 'info')
+    const xemTatCa = await page.evaluate(() => {
+      const btn = document.querySelector('[aria-label="Xem tất cả trang cá nhân"]')
+      if (btn) { btn.scrollIntoView({ behavior: 'instant', block: 'center' }); btn.click(); return true }
+      const span = [...document.querySelectorAll('span')]
+        .find(s => s.textContent.trim().includes('Xem tất cả'))
+      if (span) { span.scrollIntoView({ behavior: 'instant', block: 'center' }); span.click(); return true }
+      return false
+    })
+
+    if (!xemTatCa) {
+      await page.keyboard.press('Escape')
+      throw new Error(`Không tìm thấy kênh "${targetName}" để đăng`)
+    }
+
+    await sleep(2000)
+
+    // Bước 5: Tìm lại trong danh sách đầy đủ
+    const result2 = await _findAndClickChannel(page, targetName)
+
+    if (result2 === 'already_active') {
+      sendLog(`Đã đúng kênh "${targetName}" ✓`, 'ok')
+      await page.keyboard.press('Escape')
+      return true
+    }
+
+    if (result2 === 'clicked') {
+      sendLog(`Đã click kênh "${targetName}" ✓`, 'ok')
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}),
+        sleep(500),
+      ])
+      await sleep(6000)
+      return true
+    }
+
+    await page.keyboard.press('Escape')
+    throw new Error(`Không tìm thấy kênh "${targetName}" trong danh sách`)
+
+  } catch (e) {
+    sendLog(`switchToPage lỗi: ${e.message}`, 'error')
+    return false
+  }
+}
+
+// ─── Helper: Tìm và click kênh trong panel hiện tại ──────────
+// Return: 'already_active' | 'clicked' | 'not_found'
+async function _findAndClickChannel(page, targetName) {
+  return await page.evaluate((targetName) => {
+    // Panel "Chuyển nhanh trang cá nhân" có aria-label chuẩn
+    const panel = document.querySelector('[aria-label="Chuyển nhanh trang cá nhân"]')
+    const items = panel
+      ? [...panel.querySelectorAll('[role="button"]')]
+      : [...document.querySelectorAll('[role="button"][aria-label^="Chuyển sang"]')]
+
+    if (items.length === 0) return 'not_found'
+
+    // Item đầu = tài khoản đang active
+    const firstLabel = (items[0]?.getAttribute('aria-label') || '').replace('Chuyển sang ', '').trim()
+    if (firstLabel === targetName || firstLabel.includes(targetName) || targetName.includes(firstLabel)) {
+      return 'already_active'
+    }
+
+    // Tìm nút có aria-label="Chuyển sang {targetName}"
+    const exactBtn = document.querySelector(`[aria-label="Chuyển sang ${targetName}"]`)
+    if (exactBtn) {
+      exactBtn.scrollIntoView({ behavior: 'instant', block: 'center' })
+      exactBtn.click()
+      return 'clicked'
+    }
+
+    // Partial match
+    const partialBtn = items.find(el => (el.getAttribute('aria-label') || '').includes(targetName))
+    if (partialBtn) {
+      partialBtn.scrollIntoView({ behavior: 'instant', block: 'center' })
+      partialBtn.click()
+      return 'clicked'
+    }
+
+    // Fallback: span text
+    const spans = panel
+      ? [...panel.querySelectorAll('span[dir="auto"]')]
+      : [...document.querySelectorAll('span[dir="auto"]')]
+    const span = spans.find(s => {
+      const t = s.textContent.trim()
+      return t === targetName || t.includes(targetName) || targetName.includes(t)
+    })
+    if (span) {
+      span.scrollIntoView({ behavior: 'instant', block: 'center' })
+      let el = span
+      for (let i = 0; i < 8; i++) {
+        if (!el) break
+        if (el.getAttribute('role') === 'button') { el.click(); return 'clicked' }
+        if (window.getComputedStyle(el).cursor === 'pointer') { el.click(); return 'clicked' }
+        el = el.parentElement
+      }
+      span.click()
+      return 'clicked'
+    }
+
+    return 'not_found'
+  }, targetName)
+}
+
 // ─── Puppeteer: Upload video to Facebook Reels ───────────────
 async function uploadVideoToFacebook(browser, row, channel) {
   // Lấy pageUrl và videoBaseDir từ channel config
@@ -614,10 +798,9 @@ async function uploadVideoToFacebook(browser, row, channel) {
   await page.goto('https://www.facebook.com', { waitUntil: 'networkidle2', timeout: 30000 })
   await sleep(2000)
 
-  // Click nút "Chuyển ngay" trên trang Profile của Page
   const switched = await switchToPage(page, channel)
 
-  // Sau khi switch Facebook reload → lấy lại page reference mới nhất
+  // Sau khi switch, Facebook reload → lấy lại page reference mới nhất
   const freshPages = await browser.pages()
   page = freshPages.find(p => p.url().includes('facebook.com')) || page
 
@@ -667,11 +850,12 @@ async function uploadVideoToFacebook(browser, row, channel) {
     throw new Error(`File không tồn tại: ${filePath}`)
   }
 
-  // waitForFileChooser phải set TRƯỚC khi click để bắt event
+  // Puppeteer waitForFileChooser() chặn native dialog và inject file trực tiếp
+  // Phải set TRƯỚC khi trigger click để bắt được event
   sendLog('Chuẩn bị intercept file chooser...', 'info')
   const fileChooserPromise = page.waitForFileChooser({ timeout: 10000 })
 
-  // Click nút "Tải lên" bằng JS click — không cần visible
+  // Click nút "Tải lên" bằng JS (không dùng tọa độ)
   sendLog('Tìm nút "Tải lên"...', 'info')
   const foundUpload = await page.evaluate(() => {
     const span = [...document.querySelectorAll('span')]
@@ -690,12 +874,8 @@ async function uploadVideoToFacebook(browser, row, channel) {
     }
     span.click(); return true
   })
-
-  if (foundUpload) {
-    sendLog('Đã click "Tải lên" ✓', 'ok')
-  } else {
-    sendLog('Không tìm thấy nút "Tải lên" — thử input trực tiếp', 'warn')
-  }
+  if (!foundUpload) sendLog('Không tìm thấy nút "Tải lên" — thử input trực tiếp', 'warn')
+  else sendLog('Đã click "Tải lên" ✓', 'ok')
   sendLog('Đang chờ file chooser...', 'info')
 
   // Đợi file chooser bị intercept (native dialog bị chặn bởi Puppeteer)
@@ -744,7 +924,7 @@ async function uploadVideoToFacebook(browser, row, channel) {
   const d1 = await humanDelayLog('beforeNext1', DELAY.beforeNext1Min, DELAY.beforeNext1Max)
   sendLog(`Click "Tiếp" bước 1 (sau delay ${d1}ms)...`, 'info')
   await clickButtonByText(page, ['Tiếp', 'Next'])
-  sendLog(`Chờ afterNext1 (${DELAY.afterNext1}ms) — màn chỉnh sửa load...`, 'info')
+  debugLog(`Chờ afterNext1 (${DELAY.afterNext1}ms) — màn chỉnh sửa load...`)
   await sleep(DELAY.afterNext1)
 
   // ── Bước 7: Chờ "Tiếp" lần 2 sẵn sàng rồi click ──
@@ -753,17 +933,15 @@ async function uploadVideoToFacebook(browser, row, channel) {
   const d2 = await humanDelayLog('beforeNext2', DELAY.beforeNext2Min, DELAY.beforeNext2Max)
   sendLog(`Click "Tiếp" bước 2 - bỏ qua chỉnh sửa (sau delay ${d2}ms)...`, 'info')
   await clickButtonByText(page, ['Tiếp', 'Next'])
-  sendLog(`Chờ afterNext2 (${DELAY.afterNext2}ms) — màn cài đặt load...`, 'info')
+  debugLog(`Chờ afterNext2 (${DELAY.afterNext2}ms) — màn cài đặt load...`)
   await sleep(DELAY.afterNext2)
 
   // ── Bước 8: Điền mô tả ──
-  sendLog(`Chờ beforeDescription (${DELAY.beforeDescription}ms)...`, 'info')
+  debugLog(`Chờ beforeDescription (${DELAY.beforeDescription}ms)...`)
   await sleep(DELAY.beforeDescription)
   if (row.description) {
-    sendLog('Điền mô tả thước phim (clipboard paste)...', 'info')
-
-    // Focus vào ô mô tả
-    const focused = await page.evaluate(() => {
+    sendLog('Điền mô tả thước phim...', 'info')
+    const filled = await page.evaluate((text) => {
       const allTargets = [
         ...document.querySelectorAll('textarea'),
         ...document.querySelectorAll('[contenteditable="true"]'),
@@ -774,100 +952,97 @@ async function uploadVideoToFacebook(browser, row, channel) {
       })
       if (!box) return false
       box.focus()
-      // Xóa nội dung cũ
       if (box.tagName === 'TEXTAREA') {
         const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
-        setter.call(box, '')
+        setter.call(box, text)
         box.dispatchEvent(new Event('input', { bubbles: true }))
+        box.dispatchEvent(new Event('change', { bubbles: true }))
       } else {
         document.execCommand('selectAll', false, null)
         document.execCommand('delete', false, null)
+        document.execCommand('insertText', false, text)
+        box.dispatchEvent(new InputEvent('input', {
+          bubbles: true, data: text, inputType: 'insertText'
+        }))
       }
       return true
-    })
+    }, row.description)
 
-    if (focused) {
-      // Dùng clipboard API để paste — tránh autocomplete khi type từng ký tự
-      await page.evaluate((text) => {
-        // Ghi text vào clipboard
-        return navigator.clipboard.writeText(text).catch(() => {
-          // Fallback nếu clipboard API không khả dụng
-          const el = document.activeElement
-          if (el && el.tagName === 'TEXTAREA') {
-            const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
-            setter.call(el, text)
-            el.dispatchEvent(new Event('input', { bubbles: true }))
-            el.dispatchEvent(new Event('change', { bubbles: true }))
-          }
-        })
-      }, row.description)
-
-      await sleep(300)
-
-      // Ctrl+A để chọn hết (đề phòng còn text cũ), rồi Ctrl+V để paste
-      await page.keyboard.down('Control')
-      await page.keyboard.press('a')
-      await page.keyboard.up('Control')
-      await sleep(100)
-      await page.keyboard.down('Control')
-      await page.keyboard.press('v')
-      await page.keyboard.up('Control')
-      await sleep(500)
-
-      // Đóng bất kỳ dropdown autocomplete nào bằng Escape
-      await page.keyboard.press('Escape')
-      await sleep(300)
-
+    if (filled) {
       sendLog('Đã điền mô tả ✓', 'ok')
     } else {
       sendLog('Không tìm thấy ô mô tả, bỏ qua...', 'warn')
     }
-    sendLog(`Chờ afterDescription (${DELAY.afterDescription}ms)...`, 'info')
+    debugLog(`Chờ afterDescription (${DELAY.afterDescription}ms)...`)
     await sleep(DELAY.afterDescription)
   }
 
-  // ── Bước 9: Click "Đăng" (nút xanh, không phải nút "Lưu") ──
+  // ── Bước 9: Click "Đăng" — rightmost span + JS click ──
   const d3 = await humanDelayLog('beforePublish', DELAY.beforePublishMin, DELAY.beforePublishMax)
   sendLog(`Tìm nút "Đăng" (sau delay ${d3}ms)...`, 'info')
   await waitForButtonActive(page, ['Đăng', 'Publish', 'Share'])
   await humanDelay(500, 1500)
 
-  // Snapshot ID hiện có TRƯỚC khi đăng để so sánh sau
+  // Snapshot reels hiện có
   sendLog('Snapshot danh sách reel hiện có...', 'info')
   const existingReelIds = await page.evaluate(() => {
     const links = [...document.querySelectorAll('a[href*="/reel/"]')]
     return links.map(l => {
-      const m = l.href.match(/\/reel\/(\d{10,18})/)
+      const m = l.href.match(/\/reel\/(\d{10,})/)
       return m ? m[1] : null
     }).filter(Boolean)
   })
-  sendLog(`Snapshot: ${existingReelIds.length} reels hiện có`, 'info')
+  sendLog(`Hiện có ${existingReelIds.length} reels`, 'info')
 
-  // Click nút "Đăng" — rightmost span + scrollIntoView + JS click
-  // Facebook layout: [Lưu] [Đăng] — "Đăng" luôn ở bên phải hơn
+  // Setup network interceptor TRƯỚC khi click Đăng
+  let networkVideoId = null
+  const responseHandler = async (response) => {
+    try {
+      const url = response.url()
+      if (!url.includes('facebook.com')) return
+      if (url.includes('graphql') || url.includes('video') ||
+          url.includes('reel') || url.includes('composer')) {
+        const status = response.status()
+        if (status < 200 || status >= 300) return
+        const text = await response.text().catch(() => '')
+        if (!text || text.length < 10) return
+        const patterns = [
+          /"video_id"\s*:\s*"?(\d{12,18})"?/,
+          /"reel_id"\s*:\s*"?(\d{12,18})"?/,
+          /"creation_story_id"\s*:\s*"?(\d{12,18})"?/,
+          /"post_id"\s*:\s*"?(\d{12,18})"?/,
+        ]
+        for (const pattern of patterns) {
+          const m = text.match(pattern)
+          if (m && m[1] && !existingReelIds.includes(m[1])) {
+            networkVideoId = m[1]
+            sendLog(`✓ Bắt được video ID mới từ network: ${networkVideoId}`, 'ok')
+            return
+          }
+        }
+      }
+    } catch (_) {}
+  }
+  page.on('response', responseHandler)
+
+  // Click "Đăng" — JS click, rightmost span, scrollIntoView
   const dangClicked = await page.evaluate(() => {
     const allSpans = [...document.querySelectorAll('span')]
     const dangSpans = allSpans.filter(s => s.textContent.trim() === 'Đăng')
     if (dangSpans.length === 0) return false
-
-    // Lấy span "Đăng" nằm xa nhất bên phải → tránh nhầm "Lưu"
+    // Sort theo bên phải → "Đăng" luôn bên phải hơn "Lưu"
     dangSpans.sort((a, b) =>
       b.getBoundingClientRect().left - a.getBoundingClientRect().left
     )
     const span = dangSpans[0]
-
-    // Scroll vào vùng nhìn thấy rồi JS click (hoạt động cả khi ngoài viewport)
     span.scrollIntoView({ behavior: 'instant', block: 'center' })
-
-    // Leo lên tìm clickable parent
-    let el = span
-    for (let i = 0; i < 8; i++) {
-      if (!el.parentElement) break
-      el = el.parentElement
-      const style = window.getComputedStyle(el)
-      if (style.cursor === 'pointer') { el.click(); return true }
-    }
     span.click()
+    let el = span.parentElement
+    for (let i = 0; i < 8; i++) {
+      if (!el) break
+      if (window.getComputedStyle(el).cursor === 'pointer') { el.click(); break }
+      el = el.parentElement
+    }
     return true
   })
 
@@ -877,102 +1052,68 @@ async function uploadVideoToFacebook(browser, row, channel) {
     sendLog('Không tìm thấy span "Đăng" — kiểm tra Chrome thủ công', 'warn')
   }
 
-  // ── Bước 10: Chờ 5 phút rồi refresh lấy ID thật ──
-  // Facebook cần ~3-5 phút để xử lý và hiển thị Reel mới
-  // Cách đáng tin nhất: refresh trang, tìm reel MỚI (không trong snapshot)
-  // có view count thấp nhất (= vừa đăng)
-  const waitMinutes = DELAY.waitAfterPublishMin || 5
-  sendLog(`Đã đăng! Chờ ${waitMinutes} phút để Facebook xử lý Reel...`, 'ok')
+  // Chờ network ID (tối đa 15s)
+  sendLog('Chờ video ID từ network response...', 'info')
+  for (let i = 0; i < 30 && !networkVideoId; i++) {
+    await sleep(500)
+  }
+  page.off('response', responseHandler)
 
-  for (let s = waitMinutes * 60; s > 0; s -= 30) {
-    await sleep(30000)
-    sendLog(`Còn ${s - 30}s trước khi refresh lấy link...`, 'info')
-    if (s <= 30) break
+  if (networkVideoId) {
+    sendLog(`Video ID từ network: ${networkVideoId}`, 'ok')
+    const link = `https://www.facebook.com/reel/${networkVideoId}`
+    sendLog(`📎 Link video: ${link}`, 'ok')
+    return networkVideoId
   }
 
-  // Refresh trang Reels (tối đa refreshAttempts lần, mỗi lần cách refreshInterval)
+  // Fallback: Refresh trang Reels nhiều lần để tìm video mới nhất
+  sendLog('Network không bắt được ID — thử refresh trang Reels để tìm...', 'warn')
+
   let realVideoId = null
-  const maxRefresh = DELAY.refreshAttempts || 3
-  const refreshInterval = DELAY.refreshInterval || 60000 // 60s mỗi lần nếu chưa thấy
+  const maxRefresh = DELAY.refreshAttempts || 5
+  const refreshInterval = DELAY.refreshInterval || 30000 // 30s mỗi lần
 
   for (let attempt = 1; attempt <= maxRefresh; attempt++) {
+    sendLog(`[Refresh ${attempt}/${maxRefresh}] Chờ ${refreshInterval/1000}s...`, 'info')
+    await sleep(refreshInterval)
+
     sendLog(`[Refresh ${attempt}/${maxRefresh}] Reload trang Reels...`, 'info')
     await page.goto(reelsUrl, { waitUntil: 'networkidle2', timeout: 30000 })
       .catch(() => page.reload({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {}))
-    await sleep(4000)
+    await sleep(3000)
 
-    // Lấy tất cả reel link + view count trên trang
-    const reelsData = await page.evaluate(() => {
-      const results = []
+    // Scan tất cả reel ID trên trang
+    const currentIds = await page.evaluate(() => {
       const links = [...document.querySelectorAll('a[href*="/reel/"]')]
-      links.forEach(link => {
-        const m = link.href.match(/\/reel\/(\d{10,17})/) // Reel ID thật: 13-17 chữ số
-        if (!m) return
-        const id = m[1]
-
-        // Tìm view count gần link này
-        // Facebook thường hiển thị "X lượt xem" hoặc số views dạng "1,2N"
-        const container = link.closest('[data-visualcompletion]') ||
-                         link.parentElement?.closest('div') ||
-                         link.parentElement
-
-        let viewText = ''
-        if (container) {
-          const allText = container.innerText || ''
-          // Tìm số views: dạng "290 lượt xem", "1,2 N lượt xem", "1.2K views"
-          const viewMatch = allText.match(/(\d[\d.,]*\s*[KMkm]?)\s*(lượt xem|views?)/i)
-          viewText = viewMatch ? viewMatch[0] : ''
-        }
-
-        results.push({ id, viewText, href: link.href })
-      })
-      // Dedup theo id
-      return [...new Map(results.map(r => [r.id, r])).values()]
+      return links.map(l => {
+        const m = l.href.match(/\/reel\/(\d{10,})/)
+        return m ? m[1] : null
+      }).filter(Boolean)
     })
 
-    sendLog(`[Refresh ${attempt}] Thấy ${reelsData.length} reels trên trang`, 'info')
+    sendLog(`[Refresh ${attempt}] Tìm thấy ${currentIds.length} reels`, 'info')
 
-    // Lọc ID mới (không có trong snapshot)
-    const newReels = reelsData.filter(r => !existingReelIds.includes(r.id))
-
-    if (newReels.length > 0) {
-      sendLog(`Tìm thấy ${newReels.length} reel mới: ${newReels.map(r => r.id).join(', ')}`, 'ok')
-
-      // Ưu tiên: reel có view thấp nhất (vừa đăng)
-      // Parse view count để sort: "290" < "1,2N" < "5,6N"
-      const parseViews = (txt) => {
-        if (!txt) return Infinity // không có view text → có thể đang xử lý
-        const clean = txt.replace(/[,\s]/g, '').toLowerCase()
-        const num = parseFloat(clean)
-        if (isNaN(num)) return Infinity
-        if (clean.includes('k')) return num * 1000
-        if (clean.includes('m')) return num * 1000000
-        if (clean.includes('n')) return num * 1000 // "N" tiếng Việt = nghìn
-        return num
-      }
-
-      newReels.sort((a, b) => parseViews(a.viewText) - parseViews(b.viewText))
-      realVideoId = newReels[0].id
-
-      sendLog(`Chọn reel mới nhất (view thấp nhất): ID=${realVideoId}`, 'ok')
-      if (newReels[0].viewText) {
-        sendLog(`View count: ${newReels[0].viewText}`, 'info')
-      }
+    // Tìm ID mới (không có trong snapshot ban đầu)
+    const newIds = currentIds.filter(id => !existingReelIds.includes(id))
+    if (newIds.length > 0) {
+      // Lấy ID đầu tiên (mới nhất — Facebook sort newest first)
+      realVideoId = newIds[0]
+      sendLog(`✓ Tìm được ${newIds.length} video mới: ${newIds.join(', ')}`, 'ok')
+      sendLog(`Chọn ID mới nhất: ${realVideoId}`, 'ok')
       break
     }
 
-    sendLog(`[Refresh ${attempt}] Chưa thấy reel mới — thử lại sau ${refreshInterval/1000}s...`, 'warn')
-    if (attempt < maxRefresh) await sleep(refreshInterval)
+    sendLog(`[Refresh ${attempt}] Chưa thấy video mới, thử lại...`, 'warn')
   }
 
   if (!realVideoId) {
-    sendLog('⚠️ Không tìm được ID sau refresh — video có thể đang xử lý', 'warn')
-    sendLog(`Xem thủ công tại: ${reelsUrl}`, 'warn')
+    sendLog('⚠️ Không tìm được video ID sau nhiều lần refresh', 'warn')
+    sendLog(`Kiểm tra thủ công tại: ${reelsUrl}`, 'warn')
     realVideoId = `UNKNOWN_${Date.now()}`
   }
 
   const reelLink = realVideoId.startsWith('UNKNOWN')
-    ? `Chưa xác định — xem tại: ${reelsUrl}`
+    ? `Không xác định — xem thủ công: ${reelsUrl}`
     : `https://www.facebook.com/reel/${realVideoId}`
 
   sendLog(`✓ Đã đăng Reels thành công!`, 'ok')
@@ -981,27 +1122,33 @@ async function uploadVideoToFacebook(browser, row, channel) {
 }
 
 // ─── DELAY CONFIG (ms) — điều chỉnh ở đây nếu cần ──────────
-const DELAY = {
-  afterFileSelect:        30000, // sau khi chọn file, trước khi bấm Escape
-  afterEscape:            3000,  // sau Escape, trước khi chờ upload
-  beforeNext1Min:         2000,  // delay tối thiểu trước "Tiếp" lần 1
-  beforeNext1Max:         4500,  // delay tối đa trước "Tiếp" lần 1
-  afterNext1:             4500,  // sau "Tiếp" lần 1, chờ màn chỉnh sửa load
-  beforeNext2Min:         2500,  // delay tối thiểu trước "Tiếp" lần 2
-  beforeNext2Max:         5000,  // delay tối đa trước "Tiếp" lần 2
-  afterNext2:             5000,  // sau "Tiếp" lần 2, chờ màn cài đặt load
-  beforeDescription:      5000,  // trước khi điền mô tả
-  afterDescription:       5000,  // sau khi điền mô tả
-  beforePublishMin:       3500,  // delay tối thiểu trước "Đăng"
-  beforePublishMax:       5000,  // delay tối đa trước "Đăng"
-  // Timeout chờ Facebook xác nhận "an toàn để đăng"
-  // Tăng nếu hay bị lỗi timeout (Facebook kiểm tra bản quyền lâu)
-  safeToPostTimeoutMin:   20,    // chờ tối đa N phút (mặc định 20 phút)
-  // Sau khi bấm "Đăng": chờ FB xử lý rồi refresh lấy link
-  waitAfterPublishMin:    5,     // chờ N phút trước khi refresh lần đầu
-  refreshAttempts:        3,     // số lần refresh tối đa nếu chưa thấy reel mới
-  refreshInterval:        60000, // chờ 60s giữa mỗi lần refresh
+// ─── DELAY: đọc từ store, fallback về default nếu chưa cấu hình ──
+const DELAY_DEFAULTS = {
+  afterFileSelect:      2000,
+  afterEscape:          1500,
+  beforeNext1Min:       2000,
+  beforeNext1Max:       4500,
+  afterNext1:           4500,
+  beforeNext2Min:       2500,
+  beforeNext2Max:       5000,
+  afterNext2:           5000,
+  beforeDescription:    5000,
+  afterDescription:     5000,
+  beforePublishMin:     3500,
+  beforePublishMax:     5000,
+  safeToPostTimeoutMin: 20,
+  waitAfterPublishMin:  5,
+  refreshAttempts:      3,
+  refreshInterval:      60000,
 }
+
+// Proxy object: DELAY.xxx đọc từ store, nếu không có dùng default
+const DELAY = new Proxy({}, {
+  get(_, key) {
+    const stored = store.get('delay') || {}
+    return stored[key] ?? DELAY_DEFAULTS[key]
+  }
+})
 
 // ─── Helper: delay ngẫu nhiên giống người dùng thật ─────────
 function humanDelay(minMs, maxMs) {
@@ -1012,7 +1159,7 @@ function humanDelay(minMs, maxMs) {
 // humanDelay có return giá trị delay thực tế để log
 async function humanDelayLog(label, minMs, maxMs) {
   const ms = Math.round(minMs + Math.random() * (maxMs - minMs))
-  sendLog(`[delay:${label}] chờ ${ms}ms...`, 'info')
+  debugLog(`[delay:${label}] chờ ${ms}ms...`)
   await sleep(ms)
   return ms
 }
@@ -1090,289 +1237,43 @@ async function closeFilePicker(page) {
   return true
 }
 
-// ─── Helper: Switch sang đúng tài khoản Page ────────────────
-// Logic từ giao diện thực tế:
-// 1. Click avatar → menu "Chuyển nhanh trang cá nhân" xuất hiện
-// 2. Item đầu = tài khoản đang active → nếu đúng kênh thì không cần click
-// 3. Kênh ở vị trí 2+ → click aria-label="Chuyển sang {tên}"
-// 4. Không thấy → click "Xem tất cả trang cá nhân" → tìm lại
-// 5. Vẫn không thấy → báo lỗi
-async function switchToPage(page, channel) {
-  const targetName = channel.name.trim()
-
-  try {
-    // ── Bước 0: Bring to front (cần thiết khi chạy ngầm) ──
-    await page.bringToFront()
-    await sleep(500)
-
-    // Đảm bảo đang ở facebook.com
-    if (!page.url().includes('facebook.com')) {
-      await page.goto('https://www.facebook.com', { waitUntil: 'networkidle2', timeout: 30000 })
-      await sleep(2000)
-    }
-
-    // ── Bước 1: Click avatar mở menu ──
-    sendLog('Click avatar để mở menu kênh...', 'info')
-
-    const avatarClicked = await page.evaluate(() => {
-      // Tìm div[role="button"] ở góc phải header chứa avatar
-      const allBtns = [...document.querySelectorAll('[role="button"]')]
-        .filter(el => {
-          const r = el.getBoundingClientRect()
-          return r.top >= 0 && r.top < 70 &&
-                 r.right > window.innerWidth * 0.8 &&
-                 r.width >= 30 && r.width <= 70
-        })
-        .sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right)
-
-      if (allBtns.length > 0) {
-        allBtns[0].click()
-        return { ok: true, method: 'header-button' }
-      }
-
-      // Fallback: tìm qua image avatar (fbcdn URL)
-      const imgs = [...document.querySelectorAll('image')]
-        .filter(img => {
-          const href = img.getAttribute('xlink:href') || img.getAttribute('href') || ''
-          const r = img.getBoundingClientRect()
-          return href.includes('fbcdn') && r.top < 70 && r.right > window.innerWidth * 0.7
-        })
-      if (imgs.length > 0) {
-        let el = imgs[0]
-        for (let i = 0; i < 8; i++) {
-          if (!el.parentElement) break
-          el = el.parentElement
-          if (el.getAttribute('role') === 'button') {
-            el.click()
-            return { ok: true, method: 'avatar-image' }
-          }
-        }
-      }
-      return { ok: false }
-    })
-
-    if (!avatarClicked?.ok) {
-      // Fallback tọa độ
-      const vw = await page.evaluate(() => window.innerWidth)
-      await page.mouse.click(vw - 40, 35)
-      sendLog('Click avatar fallback (tọa độ)', 'warn')
-    } else {
-      sendLog(`Avatar clicked (${avatarClicked.method}) ✓`, 'info')
-    }
-
-    await sleep(2000) // Chờ menu render
-
-    // ── Bước 2 + 3: Đọc menu, kiểm tra active và tìm kênh cần chuyển ──
-    const result = await _findAndClickChannel(page, targetName)
-
-    if (result === 'already_active') {
-      sendLog(`Đã đúng kênh "${targetName}" (active) ✓`, 'ok')
-      await page.keyboard.press('Escape')
-      return true
-    }
-
-    if (result === 'clicked') {
-      sendLog(`Đã click kênh "${targetName}" ✓ — chờ switch...`, 'ok')
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}),
-        sleep(500),
-      ])
-      await sleep(6000)
-      sendLog(`✓ Switch thành công sang "${targetName}"`, 'ok')
-      return true
-    }
-
-    // result === 'not_found' → Bước 4: Click "Xem tất cả trang cá nhân"
-    sendLog(`Kênh "${targetName}" chưa thấy trong menu — click "Xem tất cả"...`, 'info')
-
-    const xemTatCaClicked = await page.evaluate(() => {
-      // Dùng aria-label chính xác từ HTML thực tế
-      const btn = document.querySelector('[aria-label="Xem tất cả trang cá nhân"]')
-      if (btn) {
-        btn.scrollIntoView({ behavior: 'instant', block: 'center' })
-        btn.click()
-        return true
-      }
-      // Fallback: tìm qua span text
-      const span = [...document.querySelectorAll('span')]
-        .find(s => s.textContent.trim().includes('Xem tất cả'))
-      if (span) {
-        span.scrollIntoView({ behavior: 'instant', block: 'center' })
-        span.click()
-        return true
-      }
-      return false
-    })
-
-    if (!xemTatCaClicked) {
-      sendLog(`Không tìm thấy "Xem tất cả trang cá nhân"`, 'warn')
-      await page.keyboard.press('Escape')
-      throw new Error(`Không tìm thấy kênh "${targetName}" để đăng`)
-    }
-
-    sendLog('"Xem tất cả" đã click ✓ — chờ danh sách đầy đủ...', 'ok')
-    await sleep(2000)
-
-    // ── Bước 5: Tìm lại kênh trong danh sách đầy đủ ──
-    const result2 = await _findAndClickChannel(page, targetName)
-
-    if (result2 === 'already_active') {
-      sendLog(`Đã đúng kênh "${targetName}" (active) ✓`, 'ok')
-      await page.keyboard.press('Escape')
-      return true
-    }
-
-    if (result2 === 'clicked') {
-      sendLog(`Đã click kênh "${targetName}" trong danh sách đầy đủ ✓`, 'ok')
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}),
-        sleep(500),
-      ])
-      await sleep(6000)
-      sendLog(`✓ Switch thành công sang "${targetName}"`, 'ok')
-      return true
-    }
-
-    // ── Bước 6: Vẫn không tìm thấy → báo lỗi ──
-    await page.keyboard.press('Escape')
-    throw new Error(`Không tìm thấy kênh "${targetName}" trong danh sách trang cá nhân`)
-
-  } catch (e) {
-    sendLog(`switchToPage lỗi: ${e.message}`, 'error')
-    return false
-  }
-}
-
-// ─── Helper: Tìm và click kênh trong menu hiện tại ───────────
-// Return: 'already_active' | 'clicked' | 'not_found'
-async function _findAndClickChannel(page, targetName) {
-  return await page.evaluate((targetName) => {
-    // Tìm panel "Chuyển nhanh trang cá nhân"
-    // Từ HTML thực tế: div[aria-label="Chuyển nhanh trang cá nhân"][role="list"]
-    const panel = document.querySelector('[aria-label="Chuyển nhanh trang cá nhân"]')
-
-    let items = []
-    if (panel) {
-      // Lấy tất cả item có role="button" trong panel
-      items = [...panel.querySelectorAll('[role="button"]')]
-    } else {
-      // Fallback: lấy tất cả nút có aria-label "Chuyển sang X"
-      items = [...document.querySelectorAll('[role="button"][aria-label^="Chuyển sang"]')]
-    }
-
-    if (items.length === 0) return 'not_found'
-
-    // Kiểm tra item đầu tiên = tài khoản đang active
-    // Từ HTML: aria-label="Chuyển sang Cuong Doan" là item đầu tiên
-    // Item đầu trong panel là tài khoản cá nhân gốc (active)
-    // Các kênh Page là item tiếp theo
-    const firstItem = items[0]
-    const firstLabel = firstItem?.getAttribute('aria-label') || ''
-    const firstName = firstLabel.replace('Chuyển sang ', '').trim()
-
-    // Kiểm tra kênh đang active (item đầu tiên không phải "Chuyện sang" mà là tên kênh)
-    // Nếu item đầu là kênh cần chuyển → đang active rồi
-    if (firstName === targetName ||
-        firstName.includes(targetName) ||
-        targetName.includes(firstName)) {
-      return 'already_active'
-    }
-
-    // Tìm item có aria-label chứa targetName (từ vị trí 2 trở đi)
-    // Dùng aria-label="Chuyển sang {targetName}" chính xác nhất
-    const exactBtn = document.querySelector(
-      `[aria-label="Chuyển sang ${targetName}"]`
-    )
-    if (exactBtn) {
-      exactBtn.scrollIntoView({ behavior: 'instant', block: 'center' })
-      exactBtn.click()
-      return 'clicked'
-    }
-
-    // Partial match: aria-label chứa targetName
-    const partialBtn = items.find(el => {
-      const label = el.getAttribute('aria-label') || ''
-      return label.includes(targetName)
-    })
-    if (partialBtn) {
-      partialBtn.scrollIntoView({ behavior: 'instant', block: 'center' })
-      partialBtn.click()
-      return 'clicked'
-    }
-
-    // Fallback: tìm qua span text trong panel
-    const spans = panel
-      ? [...panel.querySelectorAll('span[dir="auto"]')]
-      : [...document.querySelectorAll('span[dir="auto"]')]
-
-    const span = spans.find(s => {
-      const t = s.textContent.trim()
-      return t === targetName || t.includes(targetName) || targetName.includes(t)
-    })
-    if (span) {
-      span.scrollIntoView({ behavior: 'instant', block: 'center' })
-      // Leo lên tìm role="button" để click
-      let el = span
-      for (let i = 0; i < 8; i++) {
-        if (!el) break
-        if (el.getAttribute('role') === 'button') { el.click(); return 'clicked' }
-        if (window.getComputedStyle(el).cursor === 'pointer') { el.click(); return 'clicked' }
-        el = el.parentElement
-      }
-      span.click()
-      return 'clicked'
-    }
-
-    return 'not_found'
-  }, targetName)
-}
+// ─── Helper: click nút theo text — dùng mouse thật ──────────
 async function clickButtonByText(page, texts) {
-  for (const text of texts) {
-    // Tìm element, scroll vào view, rồi click bằng JS (không cần visible)
-    const result = await page.evaluate((text) => {
+  // Dùng JS click trực tiếp — scrollIntoView trước, không dùng tọa độ
+  // Hoạt động kể cả khi element ngoài viewport (màn hình nhỏ)
+  const result = await page.evaluate((texts) => {
+    for (const text of texts) {
       const allSpans = [...document.querySelectorAll('span')]
       const span = allSpans.find(s => s.textContent.trim() === text)
-      if (!span) return { found: false }
+      if (!span) continue
 
-      // Leo lên tìm element clickable
-      let el = span
+      // Leo lên tìm clickable parent
       let clickTarget = span
+      let el = span
       for (let i = 0; i < 10; i++) {
         const tag = el.tagName?.toLowerCase()
         const role = el.getAttribute?.('role')
         const disabled = el.disabled || el.getAttribute?.('aria-disabled') === 'true'
-        if (disabled) return { found: false, reason: 'disabled' }
-        if (tag === 'button' || role === 'button') {
-          clickTarget = el; break
-        }
+        if (disabled) break
+        if (tag === 'button' || role === 'button') { clickTarget = el; break }
         const style = window.getComputedStyle(el)
         if (style.cursor === 'pointer') clickTarget = el
         if (!el.parentElement) break
         el = el.parentElement
       }
 
-      // Scroll element vào vùng nhìn thấy (quan trọng khi màn hình nhỏ)
+      // Scroll vào view rồi JS click — không cần visible trong viewport
       clickTarget.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' })
-
-      // Click bằng JS trực tiếp — hoạt động kể cả khi element ngoài viewport
       clickTarget.click()
-
-      const r = clickTarget.getBoundingClientRect()
-      return {
-        found: true,
-        tag: clickTarget.tagName,
-        x: Math.round(r.left + r.width / 2),
-        y: Math.round(r.top + r.height / 2),
-        inViewport: r.top >= 0 && r.bottom <= window.innerHeight,
-      }
-    }, text)
-
-    if (result?.found) {
-      const viewportInfo = result.inViewport ? 'in viewport' : 'scrolled into view'
-      sendLog(`Đã click "${text}" (JS click, ${viewportInfo}) ✓`, 'ok')
-      await sleep(300)
       return text
     }
+    return null
+  }, texts)
+
+  if (result) {
+    sendLog(`Đã click "${result}" (JS click) ✓`, 'ok')
+    await sleep(300)
+    return result
   }
 
   sendLog(`Không tìm thấy nút [${texts.join('/')}]`, 'warn')
@@ -1382,10 +1283,7 @@ async function clickButtonByText(page, texts) {
 // ─── Helper: chờ Facebook xác nhận "an toàn để đăng" ────────
 // Chờ text "Thước phim của bạn an toàn để đăng!" xuất hiện
 // — đây là tín hiệu chính xác nhất: upload xong + quét bản quyền xong
-async function waitForSafeToPost(page) {
-  // Đọc timeout từ DELAY config — dễ điều chỉnh không cần sửa code
-  const timeoutMs = (DELAY.safeToPostTimeoutMin || 20) * 60 * 1000
-  const timeoutMin = Math.round(timeoutMs / 60000)
+async function waitForSafeToPost(page, timeout = 600000) {
   const start = Date.now()
   let lastLog = 0
 
@@ -1407,9 +1305,9 @@ async function waitForSafeToPost(page) {
     'Checking',
   ]
 
-  sendLog(`Đang chờ Facebook xác nhận an toàn đăng (timeout ${timeoutMin} phút)...`, 'info')
+  sendLog('Đang chờ Facebook xác nhận an toàn đăng...', 'info')
 
-  while (Date.now() - start < timeoutMs) {
+  while (Date.now() - start < timeout) {
     const result = await page.evaluate((safeMsgs, processMsgs) => {
       const allText = document.body.innerText || ''
 
@@ -1444,7 +1342,7 @@ async function waitForSafeToPost(page) {
     await sleep(2000)
   }
 
-  throw new Error(`Timeout ${timeoutMin} phút: Facebook chưa xác nhận an toàn đăng`)
+  throw new Error('Timeout 10 phút: Facebook chưa xác nhận an toàn đăng')
 }
 
 // ─── Helper: chờ nút bất kỳ active ──────────────────────────
@@ -1527,28 +1425,24 @@ async function setSchedule(page, scheduledAt) {
     }) || null
   })
 
-  // moreBtn - dùng JS click
-  await page.evaluate(() => {
-    const btns = [...document.querySelectorAll('[role="button"], button, div')]
-    const btn = btns.find(el => {
-      const text = (el.getAttribute('aria-label') || el.textContent || '').toLowerCase()
-      return text.includes('more') || text.includes('schedule') ||
-             text.includes('option') || el.textContent.trim() === '...'
-    })
-    if (btn) { btn.scrollIntoView({ behavior: 'instant', block: 'center' }); btn.click() }
-  })
-  await sleep(1500)
+  if (moreBtn.asElement()) {
+    await moreBtn.asElement().click()
+    await sleep(1500)
+  }
 
-  // scheduleOption - dùng JS click
-  await page.evaluate(() => {
+  // Tìm option "Schedule"
+  const scheduleOption = await page.evaluateHandle(() => {
     const items = [...document.querySelectorAll('[role="menuitem"], [role="option"], div[tabindex]')]
-    const item = items.find(el => {
+    return items.find(el => {
       const text = (el.textContent || '').toLowerCase()
       return text.includes('schedule') || text.includes('lên lịch')
-    })
-    if (item) { item.scrollIntoView({ behavior: 'instant', block: 'center' }); item.click() }
+    }) || null
   })
-  await sleep(1500)
+
+  if (scheduleOption.asElement()) {
+    await scheduleOption.asElement().click()
+    await sleep(1500)
+  }
 
   // Parse datetime
   const dt = new Date(scheduledAt.replace(' ', 'T') + '+07:00')
@@ -1580,36 +1474,40 @@ async function setSchedule(page, scheduledAt) {
 
   await sleep(500)
 
-  // Confirm schedule - dùng JS click
-  await page.evaluate(() => {
+  // Confirm schedule
+  const confirmBtn = await page.evaluateHandle(() => {
     const btns = [...document.querySelectorAll('[role="button"], button')]
-    const btn = btns.find(b => {
+    return btns.find(b => {
       const text = (b.getAttribute('aria-label') || b.textContent || '').toLowerCase()
       return text.includes('confirm') || text.includes('save') || text.includes('xác nhận')
-    })
-    if (btn) { btn.scrollIntoView({ behavior: 'instant', block: 'center' }); btn.click() }
+    }) || null
   })
-  await sleep(1000)
+
+  if (confirmBtn.asElement()) {
+    await confirmBtn.asElement().click()
+    await sleep(1000)
+  }
 }
 
 async function publish(page, isScheduled) {
-  // Tìm nút publish/schedule bằng JS click
-  const clicked = await page.evaluate(() => {
+  // Tìm nút publish/schedule
+  const btn = await page.evaluateHandle(() => {
     const btns = [...document.querySelectorAll('[role="button"], button')]
-    const btn = btns.find(b => {
+    return btns.find(b => {
       const text = (b.getAttribute('aria-label') || b.textContent || '').toLowerCase()
-      return text.includes('schedule future') || text.includes('schedule post') ||
-             text.includes('post') || text.includes('đăng')
-    })
-    if (!btn) return false
-    btn.scrollIntoView({ behavior: 'instant', block: 'center' })
-    btn.click()
-    return true
+      return text.includes('schedule future') ||
+             text.includes('schedule post') ||
+             text.includes('post') ||
+             text.includes('đăng')
+    }) || null
   })
 
-  if (!clicked) throw new Error('Không tìm thấy nút Đăng')
+  if (!btn.asElement()) throw new Error('Không tìm thấy nút Đăng')
+
+  await btn.asElement().click()
   await sleep(5000)
 
+  // Lấy video ID từ URL hoặc response
   const url = page.url()
   const match = url.match(/\/(\d+)/)
   return match ? match[1] : `fb_${Date.now()}`

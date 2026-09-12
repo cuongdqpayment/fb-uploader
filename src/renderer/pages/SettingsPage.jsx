@@ -30,6 +30,12 @@ export default function SettingsPage() {
 
   const setGlobal = (key, val) => setCfg(prev => ({ ...prev, [key]: val }))
 
+  // Helper: set delay sub-field
+  const setDelay = (key, val) => setCfg(prev => ({
+    ...prev,
+    delay: { ...(prev.delay || {}), [key]: val }
+  }))
+
   const setChannel = (id, key, val) => setCfg(prev => ({
     ...prev,
     channels: prev.channels.map(ch => ch.id === id ? { ...ch, [key]: val } : ch)
@@ -244,6 +250,133 @@ export default function SettingsPage() {
                 onChange={e => setGlobal('delayBetween', parseInt(e.target.value) || 15)}
                 min={5} max={300} style={{ width: 120 }} />
             </div>
+          </div>
+
+          {/* Log Level */}
+          <div className="card">
+            <div className="card-title" style={{ marginBottom: 16 }}>🔍 Log & Debug</div>
+            <div className="form-group">
+              <label className="form-label">Log Level</label>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {['error', 'warn', 'info', 'debug'].map(level => (
+                  <label key={level} style={{
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    padding: '6px 14px', borderRadius: 8, cursor: 'pointer',
+                    border: `1px solid ${(cfg.logLevel || 'info') === level ? 'var(--blue)' : 'var(--bg-4)'}`,
+                    background: (cfg.logLevel || 'info') === level ? 'var(--blue-glow)' : 'transparent',
+                    color: (cfg.logLevel || 'info') === level ? 'var(--blue)' : 'var(--text-2)',
+                    fontSize: 13, fontWeight: 600,
+                  }}>
+                    <input type="radio" name="logLevel" value={level}
+                      checked={(cfg.logLevel || 'info') === level}
+                      onChange={() => setGlobal('logLevel', level)}
+                      style={{ display: 'none' }} />
+                    {level === 'error' && '🔴 Error'}
+                    {level === 'warn'  && '🟡 Warn'}
+                    {level === 'info'  && '🔵 Info'}
+                    {level === 'debug' && '🟣 Debug'}
+                  </label>
+                ))}
+              </div>
+              <p className="form-hint" style={{ marginTop: 8 }}>
+                <b>Error</b>: chỉ lỗi &nbsp;·&nbsp;
+                <b>Warn</b>: lỗi + cảnh báo &nbsp;·&nbsp;
+                <b>Info</b>: bình thường (mặc định) &nbsp;·&nbsp;
+                <b>Debug</b>: verbose, in tất cả chi tiết
+              </p>
+            </div>
+          </div>
+
+          {/* Delay Settings */}
+          <div className="card">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+              <div className="card-title">⏱ Delay Upload (ms)</div>
+              <button className="btn btn-ghost" style={{ fontSize: 11 }}
+                onClick={() => setGlobal('delay', {})}>
+                ↺ Reset mặc định
+              </button>
+            </div>
+
+            {/* Hàm helper để render 1 input delay */}
+            {(() => {
+              const d = cfg.delay || {}
+              const DEFAULTS = {
+                afterFileSelect: 2000, afterEscape: 1500,
+                beforeNext1Min: 2000, beforeNext1Max: 4500, afterNext1: 4500,
+                beforeNext2Min: 2500, beforeNext2Max: 5000, afterNext2: 5000,
+                beforeDescription: 5000, afterDescription: 5000,
+                beforePublishMin: 3500, beforePublishMax: 5000,
+                safeToPostTimeoutMin: 20, waitAfterPublishMin: 5,
+                refreshAttempts: 3, refreshInterval: 60000,
+              }
+              const field = (key, label, hint, unit = 'ms') => (
+                <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, color: 'var(--text-1)', fontWeight: 600 }}>{label}</div>
+                    {hint && <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 1 }}>{hint}</div>}
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <input type="number"
+                      value={d[key] ?? DEFAULTS[key]}
+                      onChange={e => setDelay(key, parseInt(e.target.value) || DEFAULTS[key])}
+                      style={{ width: 90, textAlign: 'right' }}
+                      min={0} step={unit === 'ms' ? 500 : 1}
+                    />
+                    <span style={{ fontSize: 11, color: 'var(--text-3)', width: 28 }}>{unit}</span>
+                  </div>
+                </div>
+              )
+              return (
+                <div>
+                  <p style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 12 }}>
+                    Tăng nếu Facebook chậm / mạng chậm. Giảm nếu máy mạnh và muốn upload nhanh hơn.
+                  </p>
+
+                  {/* Upload flow */}
+                  <div style={{ fontSize: 12, color: 'var(--blue)', fontWeight: 700, marginBottom: 8 }}>
+                    📤 Upload & Kiểm tra bản quyền
+                  </div>
+                  {field('safeToPostTimeoutMin', 'Timeout chờ "an toàn để đăng"',
+                    'Tăng nếu hay timeout khi Facebook quét bản quyền lâu', 'phút')}
+                  {field('afterFileSelect', 'Sau khi chọn file',
+                    'Chờ Facebook nhận file xong trước khi tiếp tục')}
+
+                  {/* Tiếp bước 1 & 2 */}
+                  <div style={{ fontSize: 12, color: 'var(--blue)', fontWeight: 700, margin: '12px 0 8px' }}>
+                    ▶ Bước "Tiếp" lần 1 (sau upload)
+                  </div>
+                  {field('beforeNext1Min', 'Delay tối thiểu trước "Tiếp" 1', '')}
+                  {field('beforeNext1Max', 'Delay tối đa trước "Tiếp" 1', 'Random trong khoảng min→max')}
+                  {field('afterNext1', 'Sau "Tiếp" 1 — chờ màn chỉnh sửa load', '')}
+
+                  <div style={{ fontSize: 12, color: 'var(--blue)', fontWeight: 700, margin: '12px 0 8px' }}>
+                    ▶ Bước "Tiếp" lần 2 (qua màn cài đặt)
+                  </div>
+                  {field('beforeNext2Min', 'Delay tối thiểu trước "Tiếp" 2', '')}
+                  {field('beforeNext2Max', 'Delay tối đa trước "Tiếp" 2', 'Random trong khoảng min→max')}
+                  {field('afterNext2', 'Sau "Tiếp" 2 — chờ màn cài đặt load', '')}
+
+                  {/* Mô tả & Đăng */}
+                  <div style={{ fontSize: 12, color: 'var(--blue)', fontWeight: 700, margin: '12px 0 8px' }}>
+                    📝 Mô tả & Đăng
+                  </div>
+                  {field('beforeDescription', 'Trước khi điền mô tả', 'Chờ ô mô tả sẵn sàng')}
+                  {field('afterDescription', 'Sau khi điền mô tả', 'Chờ trước khi click Đăng')}
+                  {field('beforePublishMin', 'Delay tối thiểu trước "Đăng"', '')}
+                  {field('beforePublishMax', 'Delay tối đa trước "Đăng"', 'Random trong khoảng min→max')}
+
+                  {/* Refresh lấy link */}
+                  <div style={{ fontSize: 12, color: 'var(--blue)', fontWeight: 700, margin: '12px 0 8px' }}>
+                    🔗 Refresh lấy link video
+                  </div>
+                  {field('waitAfterPublishMin', 'Chờ sau khi Đăng trước khi refresh',
+                    'Facebook cần ~3-5 phút xử lý Reels', 'phút')}
+                  {field('refreshAttempts', 'Số lần refresh tối đa', 'Nếu chưa thấy link mới', 'lần')}
+                  {field('refreshInterval', 'Khoảng cách giữa mỗi lần refresh',
+                    'Nếu lần refresh trước chưa thấy link')}
+                </div>
+              )
+            })()}
           </div>
         </>
       )}
