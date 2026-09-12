@@ -940,11 +940,13 @@ async function uploadVideoToFacebook(browser, row, channel) {
   await sleep(DELAY.afterNext2)
 
   // ── Bước 8: Điền mô tả ──
-  sendLog(`Chờ beforeDescription (${DELAY.beforeDescription}ms)...`, 'info')
+  debugLog(`Chờ beforeDescription (${DELAY.beforeDescription}ms)...`)
   await sleep(DELAY.beforeDescription)
   if (row.description) {
     sendLog('Điền mô tả thước phim...', 'info')
-    const filled = await page.evaluate((text) => {
+
+    // Focus ô mô tả và xóa sạch trước bằng keyboard (tránh React double-render)
+    const focused = await page.evaluate(() => {
       const allTargets = [
         ...document.querySelectorAll('textarea'),
         ...document.querySelectorAll('[contenteditable="true"]'),
@@ -955,28 +957,36 @@ async function uploadVideoToFacebook(browser, row, channel) {
       })
       if (!box) return false
       box.focus()
-      if (box.tagName === 'TEXTAREA') {
-        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
-        setter.call(box, text)
-        box.dispatchEvent(new Event('input', { bubbles: true }))
-        box.dispatchEvent(new Event('change', { bubbles: true }))
-      } else {
-        document.execCommand('selectAll', false, null)
-        document.execCommand('delete', false, null)
-        document.execCommand('insertText', false, text)
-        box.dispatchEvent(new InputEvent('input', {
-          bubbles: true, data: text, inputType: 'insertText'
-        }))
-      }
       return true
-    }, row.description)
+    })
 
-    if (filled) {
+    if (focused) {
+      // Xóa bằng keyboard thật trước (tránh React restore nội dung cũ)
+      await page.keyboard.down('Control')
+      await page.keyboard.press('a')
+      await page.keyboard.up('Control')
+      await sleep(100)
+      await page.keyboard.press('Delete')
+      await sleep(100)
+
+      // Điền bằng clipboard paste — tránh autocomplete gợi ý
+      await page.evaluate((text) => navigator.clipboard.writeText(text).catch(() => {}), row.description)
+      await sleep(200)
+      await page.keyboard.down('Control')
+      await page.keyboard.press('v')
+      await page.keyboard.up('Control')
+      await sleep(300)
+
+      // Đóng gợi ý autocomplete nếu có
+      await page.keyboard.press('Escape')
+      await sleep(200)
+
       sendLog('Đã điền mô tả ✓', 'ok')
     } else {
       sendLog('Không tìm thấy ô mô tả, bỏ qua...', 'warn')
     }
-    sendLog(`Chờ afterDescription (${DELAY.afterDescription}ms)...`, 'info')
+
+    debugLog(`Chờ afterDescription (${DELAY.afterDescription}ms)...`)
     await sleep(DELAY.afterDescription)
   }
 
