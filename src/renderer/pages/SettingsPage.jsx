@@ -20,6 +20,7 @@ export default function SettingsPage() {
           sheetTab: cfg.sheetTab || 'upload_facebook',
           pageUrl: cfg.facebookPageUrl || '',
           videoBaseDir: cfg.videoBaseDir || '',
+          skipCopyrightCheck: false,
         }]
       }
       setCfg(cfg)
@@ -50,6 +51,7 @@ export default function SettingsPage() {
       sheetTab: 'upload_facebook',
       pageUrl: '',
       videoBaseDir: '',
+      skipCopyrightCheck: false,
     }
     const updated = [...(cfg.channels || []), newCh]
     setCfg(prev => ({ ...prev, channels: updated }))
@@ -300,14 +302,16 @@ export default function SettingsPage() {
             {/* Hàm helper để render 1 input delay */}
             {(() => {
               const d = cfg.delay || {}
+              // Phải khớp với DEFAULTS ở src/main/automation/delayConfig.js —
+              // đây là giá trị THỰC SỰ đang áp dụng khi chưa lưu gì ở đây.
               const DEFAULTS = {
-                afterFileSelect: 2000, afterEscape: 1500,
+                afterFileSelect: 0,
                 beforeNext1Min: 2000, beforeNext1Max: 4500, afterNext1: 4500,
                 beforeNext2Min: 2500, beforeNext2Max: 5000, afterNext2: 5000,
                 beforeDescription: 5000, afterDescription: 5000,
                 beforePublishMin: 3500, beforePublishMax: 5000,
-                safeToPostTimeoutMin: 20, waitAfterPublishMin: 5,
-                refreshAttempts: 3, refreshInterval: 60000,
+                safeToPostTimeoutMin: 10, waitAfterPublishMin: 0,
+                refreshAttempts: 5, refreshInterval: 30000,
               }
               const field = (key, label, hint, unit = 'ms') => (
                 <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
@@ -411,6 +415,23 @@ export default function SettingsPage() {
               <input type="text" value={activeChannel.name}
                 onChange={e => setChannel(activeChannel.id, 'name', e.target.value)}
                 placeholder="Chuyện Kể Đêm Khuya" />
+            </div>
+
+            <div className="divider" />
+            <div className="toggle-row">
+              <div className="toggle-info">
+                <div className="toggle-name">Bỏ qua kiểm tra bản quyền</div>
+                <div className="toggle-desc">
+                  Bật nếu đây là tài khoản Facebook cá nhân <b>chưa bật Chế độ chuyên nghiệp</b> —
+                  Facebook sẽ không quét bản quyền nên không bao giờ hiện "an toàn để đăng".
+                  Khi bật, app chỉ chờ nút "Tiếp" tự bật lên sau khi upload xong.
+                </div>
+              </div>
+              <label className="switch">
+                <input type="checkbox" checked={activeChannel.skipCopyrightCheck || false}
+                  onChange={e => setChannel(activeChannel.id, 'skipCopyrightCheck', e.target.checked)} />
+                <span className="slider-track" />
+              </label>
             </div>
           </div>
 

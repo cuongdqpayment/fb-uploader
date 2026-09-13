@@ -20,7 +20,7 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",
     "concurrently": "^8.2.2",
-    "electron": "^31.0.0",
+    "electron": "^44.3.0",
     "electron-builder": "^24.13.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -31,8 +31,14 @@
   "build": {
     "appId": "com.h2dev.fb-video-uploader",
     "productName": "FB Video Uploader",
-    "directories": { "output": "dist-app" },
-    "files": ["dist/**/*", "src/main/**/*", "node_modules/**/*"],
+    "directories": {
+      "output": "dist-app"
+    },
+    "files": [
+      "dist/**/*",
+      "src/main/**/*",
+      "node_modules/**/*"
+    ],
     "mac": {
       "target": "dmg",
       "category": "public.app-category.productivity"
