@@ -14,14 +14,19 @@ contextBridge.exposeInMainWorld('api', {
   openUrl:  (url)     => ipcRenderer.invoke('shell:openExternal', url),
 
   // Google Sheets
-  testSheets:     (channelId) => ipcRenderer.invoke('sheets:test', channelId),
-  fetchSheets:    (channelId) => ipcRenderer.invoke('sheets:fetch', channelId),
-  fetchAllSheets: ()          => ipcRenderer.invoke('sheets:fetchAll'),
+  testSheets:           (channelId) => ipcRenderer.invoke('sheets:test', channelId),
+  fetchSheets:          (channelId) => ipcRenderer.invoke('sheets:fetch', channelId),
+  fetchCommentReady:    (channelId) => ipcRenderer.invoke('sheets:fetchCommentReady', channelId),
+  fetchAllSheets:       ()          => ipcRenderer.invoke('sheets:fetchAll'),
 
   // Upload control
   runNow:       (channelId) => ipcRenderer.invoke('upload:runNow', channelId),
   runScheduled: (channelId) => ipcRenderer.invoke('upload:runScheduled', channelId),
   stopRun: ()               => ipcRenderer.invoke('upload:stop'),
+
+  // Comment control
+  runCommentNow:  (channelId) => ipcRenderer.invoke('comment:runNow', channelId),
+  stopCommentRun: ()          => ipcRenderer.invoke('comment:stop'),
 
   // Scheduler
   startScheduler:    ()  => ipcRenderer.invoke('scheduler:start'),
@@ -35,6 +40,9 @@ contextBridge.exposeInMainWorld('api', {
   onRowDone:        (cb) => ipcRenderer.on('row:done',         (_, d) => cb(d)),
   onRowError:       (cb) => ipcRenderer.on('row:error',        (_, d) => cb(d)),
   onSchedulerState: (cb) => ipcRenderer.on('scheduler:state',  (_, d) => cb(d)),
+  onCommentProcessing: (cb) => ipcRenderer.on('comment:processing', (_, d) => cb(d)),
+  onCommentDone:       (cb) => ipcRenderer.on('comment:done',       (_, d) => cb(d)),
+  onCommentError:      (cb) => ipcRenderer.on('comment:error',      (_, d) => cb(d)),
 
   // Cleanup
   removeAllListeners: (ch) => ipcRenderer.removeAllListeners(ch),

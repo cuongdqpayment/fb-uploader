@@ -69,3 +69,5 @@ coverage/
 # ─── Puppeteer downloaded Chrome ─────────────────────────────
 .local-chromium/
 .cache/puppeteer/
+.claude/
+.vscode/

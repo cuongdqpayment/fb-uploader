@@ -3,9 +3,11 @@ import React, { useState, useEffect, useCallback } from 'react'
 export default function Dashboard({ status }) {
   const [channels, setChannels]         = useState([])
   const [allRows, setAllRows]           = useState({})
+  const [commentRows, setCommentRows]   = useState({})
   const [loading, setLoading]           = useState(false)
   const [schedulerOn, setSchedulerOn]   = useState(false)
   const [processingRow, setProcessingRow] = useState(null)
+  const [processingComment, setProcessingComment] = useState(null)
   const [activeChannel, setActiveChannel] = useState(null)
 
   // Subscribe to row events + scheduler state
@@ -33,11 +35,30 @@ export default function Dashboard({ status }) {
     if (window.api.onSchedulerState) {
       window.api.onSchedulerState((enabled) => setSchedulerOn(!!enabled))
     }
+    // Bình luận: dòng đang xử lý / đã xong / lỗi
+    if (window.api.onCommentProcessing) {
+      window.api.onCommentProcessing((data) => setProcessingComment(data))
+    }
+    if (window.api.onCommentDone) {
+      window.api.onCommentDone(({ channelId, rowIndex, commentId }) => {
+        setCommentRows(prev => ({
+          ...prev,
+          [channelId]: (prev[channelId] || []).filter(r => r.rowIndex !== rowIndex)
+        }))
+        setProcessingComment(null)
+      })
+    }
+    if (window.api.onCommentError) {
+      window.api.onCommentError(() => setProcessingComment(null))
+    }
     return () => {
       window.api.removeAllListeners('row:processing')
       window.api.removeAllListeners('row:done')
       window.api.removeAllListeners('row:error')
       window.api.removeAllListeners('scheduler:state')
+      window.api.removeAllListeners('comment:processing')
+      window.api.removeAllListeners('comment:done')
+      window.api.removeAllListeners('comment:error')
     }
   }, [])
 
@@ -58,12 +79,26 @@ export default function Dashboard({ status }) {
     setAllRows(results ? Object.fromEntries(
       Object.entries(results).map(([id, r]) => [id, r.ok ? r.rows : []])
     ) : {})
+
+    // Các dòng đã đăng, sẵn sàng bình luận (status=posted + first_comment,
+    // chưa có comment_id) — riêng vì fetchAllSheets chỉ trả về status=pending.
+    if (window.api.fetchCommentReady) {
+      const commentResults = {}
+      for (const ch of chs) {
+        if (!ch.enabled) continue
+        const r = await window.api.fetchCommentReady(ch.id)
+        commentResults[ch.id] = r?.ok ? r.rows : []
+      }
+      setCommentRows(commentResults)
+    }
+
     setLoading(false)
   }, [])
 
   useEffect(() => { fetchAll() }, [fetchAll])
 
   const allRowsList = Object.values(allRows).flat()
+  const commentRowsList = Object.values(commentRows).flat()
   const stats = {
     total:   allRowsList.length,
     pending: allRowsList.filter(r => r.status === 'pending').length,
@@ -88,6 +123,16 @@ export default function Dashboard({ status }) {
     setTimeout(fetchAll, 3000)
   }
   const handleStop = () => window.api.stopRun()
+
+  const handleRunCommentAll = async () => {
+    await window.api.runCommentNow(null)
+    setTimeout(fetchAll, 3000)
+  }
+  const handleRunCommentChannel = async (channelId) => {
+    await window.api.runCommentNow(channelId)
+    setTimeout(fetchAll, 3000)
+  }
+  const handleStopComment = () => window.api.stopCommentRun()
 
   const toggleScheduler = async () => {
     if (schedulerOn) {
@@ -148,6 +193,30 @@ export default function Dashboard({ status }) {
         <StatCard value={stats.pending} label="Chờ đăng" color="var(--amber)" />
         <StatCard value={stats.posted}  label="Đã đăng"  color="var(--green)" />
         <StatCard value={stats.error}   label="Lỗi"      color="var(--red)" />
+        <StatCard value={commentRowsList.length} label="Chờ comment" color="var(--blue)" />
+      </div>
+
+      {/* Bình luận tự động */}
+      <div className="card">
+        <div className="card-header" style={{ flexWrap: 'wrap', gap: 8 }}>
+          <span className="card-title" style={{ fontSize: 13 }}>
+            💬 Bình luận tự động ({commentRowsList.length} chờ)
+          </span>
+          {status === 'running' ? (
+            <button className="btn btn-danger" onClick={handleStopComment}
+              style={{ fontSize: 12 }}>■ Dừng</button>
+          ) : (
+            <button className="btn btn-primary" onClick={handleRunCommentAll}
+              disabled={commentRowsList.length === 0}
+              title="Bình luận ngay các bài đã đăng có first_comment" style={{ fontSize: 12 }}>
+              💬 Bình luận ngay
+            </button>
+          )}
+        </div>
+        <p style={{ fontSize: 11, color: 'var(--text-3)', margin: 0 }}>
+          Tự động chạy cùng lịch quét ở trên — dòng status=posted có link Facebook +
+          cột first_comment sẽ được bình luận, sau đó ghi comment_id + status=commented.
+        </p>
       </div>
 
       {/* Scheduler */}
@@ -230,7 +299,7 @@ export default function Dashboard({ status }) {
               )}
             </div>
             {status !== 'running' && activeChannel && (
-              <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+              <div style={{ display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap' }}>
                 <button className="btn btn-ghost" style={{ fontSize: 10, padding: '4px 8px' }}
                   onClick={() => handleRunChannelScheduled(activeChannel)}
                   title="Chỉ đăng video đến giờ">
@@ -240,6 +309,12 @@ export default function Dashboard({ status }) {
                   onClick={() => handleRunChannel(activeChannel)}
                   title="Đăng ngay">
                   ▶ Chạy ngay
+                </button>
+                <button className="btn btn-ghost" style={{ fontSize: 10, padding: '4px 8px' }}
+                  onClick={() => handleRunCommentChannel(activeChannel)}
+                  disabled={(commentRows[activeChannel] || []).length === 0}
+                  title="Bình luận ngay các bài đã đăng của kênh này">
+                  💬 Bình luận ({(commentRows[activeChannel] || []).length})
                 </button>
               </div>
             )}

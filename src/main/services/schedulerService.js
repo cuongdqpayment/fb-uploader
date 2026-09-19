@@ -9,11 +9,21 @@ const { getMainWindow } = require('../windowState')
 
 let cronJob = null
 
-function _tick() {
+async function _tick() {
   // require trễ (lazy) để tránh vòng lặp phụ thuộc lúc load module
-  // (uploadQueueRunner không phụ thuộc ngược lại schedulerService)
+  // (uploadQueueRunner/commentQueueRunner không phụ thuộc ngược lại schedulerService)
   const { getIsRunning, runUploadQueue } = require('../queue/uploadQueueRunner')
-  if (!getIsRunning()) runUploadQueue(false)
+  const { getIsRunning: getCommentIsRunning, runCommentQueue } = require('../queue/commentQueueRunner')
+
+  try {
+    // Đăng video trước — chỉ video đến giờ (force=false)
+    if (!getIsRunning()) await runUploadQueue(false)
+    // Sau đó quét bình luận: các dòng đã posted + có first_comment sẽ
+    // được bình luận ngay, không phụ thuộc scheduled_at.
+    if (!getCommentIsRunning()) await runCommentQueue()
+  } catch (e) {
+    sendLog(`Scheduler tick lỗi: ${e.message}`, 'error')
+  }
 }
 
 // Chỉ dừng timer cron trong bộ nhớ — KHÔNG đổi cờ đã lưu trong store.

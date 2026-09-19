@@ -10,6 +10,7 @@ const { setMainWindow, getMainWindow } = require('./windowState')
 const { registerIpcHandlers } = require('./ipc/registerIpcHandlers')
 const schedulerService = require('./services/schedulerService')
 const queueRunner = require('./queue/uploadQueueRunner')
+const commentQueueRunner = require('./queue/commentQueueRunner')
 
 // ─── Window ──────────────────────────────────────────────────
 function createWindow() {
@@ -55,5 +56,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', async () => {
   await queueRunner.closeBrowserOnQuit()
+  await commentQueueRunner.closeBrowserOnQuit()
   schedulerService.stopCronTimer()
 })

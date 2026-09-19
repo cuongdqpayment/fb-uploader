@@ -9,6 +9,7 @@ const { getMainWindow } = require('../windowState')
 const sheetsService = require('../services/sheetsService')
 const schedulerService = require('../services/schedulerService')
 const queueRunner = require('../queue/uploadQueueRunner')
+const commentQueueRunner = require('../queue/commentQueueRunner')
 
 function registerIpcHandlers() {
   // ─── Config ──────────────────────────────────────────────
@@ -54,6 +55,16 @@ function registerIpcHandlers() {
     }
   })
 
+  ipcMain.handle('sheets:fetchCommentReady', async (_, channelId) => {
+    try {
+      const channel = sheetsService.getChannel(channelId)
+      const rows = await sheetsService.fetchCommentReadyRowsForChannel(channel)
+      return { ok: true, rows }
+    } catch (e) {
+      return { ok: false, error: e.message }
+    }
+  })
+
   ipcMain.handle('sheets:fetchAll', async () => {
     // Fetch tất cả channels cùng lúc
     const channels = store.get('channels') || []
@@ -93,6 +104,18 @@ function registerIpcHandlers() {
 
   ipcMain.handle('upload:stop', async () => {
     await queueRunner.stopRun()
+    return { ok: true }
+  })
+
+  // ─── Comment control ─────────────────────────────────────
+  ipcMain.handle('comment:runNow', async (_, channelId) => {
+    if (commentQueueRunner.getIsRunning()) return { ok: false, error: 'Đang chạy rồi' }
+    commentQueueRunner.runCommentQueue(channelId || null)
+    return { ok: true }
+  })
+
+  ipcMain.handle('comment:stop', async () => {
+    await commentQueueRunner.stopRun()
     return { ok: true }
   })
 }
