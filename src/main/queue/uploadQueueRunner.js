@@ -13,7 +13,7 @@ const { sendLog, debugLog, sendStatus } = require('../logger')
 const { getMainWindow } = require('../windowState')
 const { sleep } = require('../utils/sleep')
 const { parseScheduledAt } = require('../utils/dateTime')
-const { fetchPendingRowsForChannel, updateRowStatusForChannel } = require('../services/sheetsService')
+const { fetchPendingRowsForChannel, updateRowStatusForChannel, writeRowErrorForChannel } = require('../services/sheetsService')
 const { launchBrowser } = require('../browser/browserManager')
 const { ACTION_TYPES, createAction } = require('../automation/actionRegistry')
 
@@ -72,22 +72,36 @@ async function runUploadQueue(force = false, targetChannelId = null) {
         }
 
         const now = new Date()
+        // Định dạng ngày do người dùng cấu hình theo từng kênh (tick "kiểu
+        // Việt Nam"), không tự đoán. Chưa cấu hình → mặc định kiểu Việt Nam.
+        const parseOpts = { vietnameseFormat: channel.dateFormatVN !== false }
+        const fmtLabel = parseOpts.vietnameseFormat ? 'Việt Nam D/M/YYYY' : 'Mỹ M/D/YYYY'
+        let notYet = 0
+        let invalid = 0
         const due = rows.filter(r => {
           if (force) return true
           if (!r.scheduled_at) return true
-          const t = parseScheduledAt(r.scheduled_at)
+          const t = parseScheduledAt(r.scheduled_at, parseOpts)
           if (!t) {
-            sendLog(`[${r.file_name}] ⚠ Không parse được "${r.scheduled_at}" → chạy ngay`, 'warn')
-            return true
+            // Không hiểu được ngày giờ → KHÔNG đăng (trước đây "chạy ngay" là
+            // đoán ý người dùng, rủi ro đăng sớm hàng loạt nếu chọn sai định dạng)
+            invalid++
+            sendLog(`[${channel.name}] ⚠ "${r.file_name}": không hiểu ngày giờ "${r.scheduled_at}" theo định dạng ${fmtLabel} → BỎ QUA dòng này (kiểm tra ô scheduled_at hoặc tick định dạng ngày của kênh)`, 'warn')
+            return false
           }
           const isDue = t <= now
+          if (!isDue) notYet++
           debugLog(`[${r.file_name}] ${r.scheduled_at} → ${t.toLocaleString('vi-VN',{timeZone:'Asia/Ho_Chi_Minh'})} due=${isDue}`)
           return isDue
         })
 
+        if (!force) {
+          sendLog(`[${channel.name}] ${rows.length} pending: ${due.length} đã đến giờ, ${notYet} chưa đến giờ, ${invalid} sai định dạng (đang hiểu ngày theo ${fmtLabel})`, 'info')
+        }
+
         if (due.length === 0) {
           const next = rows
-            .map(r => ({ ...r, _t: parseScheduledAt(r.scheduled_at) }))
+            .map(r => ({ ...r, _t: parseScheduledAt(r.scheduled_at, parseOpts) }))
             .filter(r => r._t && r._t > now)
             .sort((a, b) => a._t - b._t)[0]
           if (next) {
@@ -119,8 +133,14 @@ async function runUploadQueue(force = false, targetChannelId = null) {
               fbVideoId,
             })
           } catch (e) {
-            await updateRowStatusForChannel(channel, row.rowIndex, 'error')
             sendLog(`[${channel.name}] ✗ Lỗi ${row.file_name}: ${e.message}`, 'error')
+            // Ghi nội dung lỗi vào Sheet (cột H) để theo dõi; việc ghi này mà
+            // lỗi cũng không được làm dừng các dòng còn lại.
+            try {
+              await writeRowErrorForChannel(channel, row.rowIndex, e.message)
+            } catch (we) {
+              sendLog(`[${channel.name}] ⚠ Không ghi được lỗi vào Sheet (dòng ${row.rowIndex}): ${we.message}`, 'warn')
+            }
             getMainWindow()?.webContents.send('row:error', {
               channelId: channel.id,
               rowIndex: row.rowIndex,

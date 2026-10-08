@@ -57,7 +57,16 @@ class BaseFacebookAction {
     this.log(`Switch sang tài khoản: ${this.channel.name}...`)
     await this.page.goto('https://www.facebook.com', { waitUntil: 'networkidle2', timeout: 30000 })
     await sleep(2000)
-    await switchToPage(this.page, this.channel)
+
+    // QUAN TRỌNG: switchToPage() trả về true/false — PHẢI kiểm tra, nếu
+    // không thì kể cả khi switch thất bại (sai kênh/không tìm thấy), code
+    // vẫn tiếp tục đăng bài như bình thường, dẫn tới đăng NHẦM kênh hoặc
+    // lỗi "không tìm thấy nút..." khó hiểu ở bước sau (đã từng xảy ra).
+    const switched = await switchToPage(this.page, this.channel)
+    if (!switched) {
+      throw new Error(`Không thể chuyển sang đúng kênh "${this.channel.name}" — dừng lại để tránh đăng nhầm kênh khác`)
+    }
+
     const freshPages = await this.browser.pages()
     this.page = freshPages.find(p => p.url().includes('facebook.com')) || this.page
     this.log(`Đã switch sang "${this.channel.name}" ✓`, 'ok')

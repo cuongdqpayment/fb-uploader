@@ -105,12 +105,17 @@ Tạo (hoặc dùng) một sheet/tab với các cột theo đúng thứ tự:
 | A | `seq` | Số thứ tự (chỉ để hiển thị) |
 | B | `file_name` | Tên file video, **hoặc đường dẫn tuyệt đối** (VD `/Users/.../video.mp4`) |
 | C | `file_path` | (dự trữ, chưa dùng — để trống) |
-| D | `scheduled_at` | Thời điểm dự kiến đăng, định dạng `YYYY-MM-DD HH:mm:ss` hoặc `DD/MM/YYYY HH:mm:ss` (giờ Việt Nam, GMT+7) |
+| D | `scheduled_at` | Thời điểm dự kiến đăng, định dạng `YYYY-MM-DD HH:mm:ss` (luôn đúng) hoặc `D/M/YYYY HH:mm:ss` / `M/D/YYYY HH:mm:ss` tuỳ tick **định dạng ngày** của kênh (giờ Việt Nam, GMT+7) |
 | E | `caption` | Chú thích ngắn — được ghép vào đầu nội dung mô tả khi đăng |
 | F | `description` | Mô tả chi tiết — được ghép sau `caption` |
 | G | `status` | `pending` → sẽ upload; `posted` → đã đăng; `error` → bị lỗi (app tự cập nhật cột này) |
-| H | `fb_video_id` | ID video Facebook sau khi đăng (app tự điền) |
+| H | `fb_video_id` | ID video Facebook sau khi đăng (app tự điền). **Nếu đăng lỗi: chứa nội dung lỗi** dạng `LỖI <giờ>: <lý do>` cùng `status = error` |
 | I | `reel_link` | Link Reels đầy đủ (app tự điền) |
+
+**Theo dõi lỗi ngay trên Sheet** (không cần mở logfile):
+- Đăng lỗi → `status = error`, cột H ghi `LỖI <giờ VN>: <lý do>`. Sửa nguyên nhân rồi đổi `status` về `pending` để đăng lại.
+- Comment lỗi → cột K (`comment_id`) ghi `LỖI <giờ VN>: <lý do>` (status vẫn `posted`). Vì K khác rỗng nên app **không tự comment lại**; muốn thử lại hãy xoá ô K.
+- Bấm **Dừng** giữa chừng khi đang comment thì không ghi lỗi.
 
 **Cách resolve đường dẫn video (cột B `file_name`)**:
 - Nếu là đường dẫn tuyệt đối (bắt đầu bằng `/`) → dùng **nguyên văn**, không ghép thêm gì.
@@ -129,6 +134,7 @@ Vào tab **Cấu hình**, mỗi kênh là một tab riêng gồm:
 - **Tên Sheet Tab**: tên tab chứa dữ liệu (mặc định `upload_facebook`).
 - **URL Facebook Page**: URL trang của kênh này (app tự thêm `?sk=reels_tab` để vào thẳng tab Reels).
 - **Thư mục chứa video**: thư mục chứa các file `.mp4` — `file_name` trong Sheet sẽ được ghép với thư mục này (trừ khi `file_name` là đường dẫn tuyệt đối).
+- **Ngày giờ trong Sheet theo kiểu Việt Nam (D/M/YYYY)**: tick cho khớp locale của Google Sheet kênh đó. Tick (mặc định) = `01/10/2026` là **ngày 1 tháng 10**; bỏ tick = kiểu Mỹ, `01/10/2026` là **ngày 10 tháng 1**. App **không tự đoán/đảo** ngày-tháng: dòng nào không đọc được `scheduled_at` theo lựa chọn này (VD `20/12/2026` khi bỏ tick) sẽ bị **bỏ qua** và báo trong log, không đăng.
 - **Bật/tắt kênh**: kênh tắt sẽ bị bỏ qua khi chạy "tất cả kênh" hoặc theo scheduler.
 - **Bỏ qua kiểm tra bản quyền**: bật nếu đây là **Facebook cá nhân chưa bật Chế độ chuyên nghiệp** — Facebook không quét bản quyền nên không bao giờ hiện "an toàn để đăng"; khi bật, app chuyển sang chờ nút **"Tiếp"** tự bật lên (hết bị khoá) sau khi upload xong, thay vì chờ thông báo đó. Mặc định tắt (dùng cho Trang/tài khoản Chuyên nghiệp có quét bản quyền như bình thường).
 
@@ -163,6 +169,6 @@ Với mỗi video đến lượt đăng, [`ReelUploadAction`](src/main/automatio
 - **Facebook thay đổi giao diện thường xuyên** → nếu app không tìm thấy nút/menu (avatar, "Tạo thước phim", "Tiếp", "Đăng"...), cần cập nhật lại các selector/text tương ứng trong [src/main/index.js](src/main/index.js).
 - App tìm phần tử chủ yếu theo **text hiển thị tiếng Việt** (VD "Tiếp", "Đăng", "Xem tất cả trang cá nhân") — nếu giao diện Facebook của bạn đang ở ngôn ngữ khác, cần chỉnh lại danh sách text tương ứng.
 - Nên **tắt Headless mode** khi mới cấu hình một kênh, để quan sát Chrome thao tác và phát hiện sớm nếu có bước bị lệch.
-- Cột `scheduled_at` trong Sheet được parse ưu tiên theo định dạng **ngày Việt Nam (D/M/YYYY)** khi có thể nhập nhằng (cả ngày và tháng đều ≤ 12).
+- Cột `scheduled_at` được hiểu **đúng theo tick định dạng ngày của kênh** (không suy diễn). Mỗi lượt chạy theo lịch, log có 1 dòng tóm tắt: `N pending: x đã đến giờ, y chưa đến giờ, z sai định dạng` — nhìn dòng này để biết vì sao một video chưa được đăng.
 - File Service Account JSON là dữ liệu nhạy cảm — không commit vào git (đã có trong `.gitignore` qua pattern `assets/*.json`).
 - Khuyến nghị delay giữa các video: 15–30 giây (điều chỉnh trong **Cấu hình → Global → Scheduler**); còn thời gian chờ trong từng bước đăng bài chỉnh riêng ở mục **Delay Upload**.

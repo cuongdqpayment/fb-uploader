@@ -26,6 +26,10 @@ const store = new Store({
         // không quét bản quyền) → bỏ qua chờ "an toàn để đăng", chỉ chờ
         // nút "Tiếp" tự bật lên. Xem automation/reelUploadAction.js.
         skipCopyrightCheck: false,
+        // true = ngày trong cột scheduled_at của Sheet kênh này theo kiểu
+        // Việt Nam D/M/YYYY; false = kiểu Mỹ M/D/YYYY. Do người dùng chọn
+        // cho khớp locale của Sheet, app không tự đoán. Xem utils/dateTime.js.
+        dateFormatVN: true,
       }
     ],
   }

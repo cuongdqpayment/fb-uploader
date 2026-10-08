@@ -84,6 +84,44 @@ async function updateRowStatusForChannel(channel, rowIndex, status, fbVideoId = 
   })
 }
 
+// ─── Ghi lỗi vào Sheet để theo dõi (không phải mở logfile) ──────
+const MAX_ERROR_LEN = 300
+
+// "LỖI <giờ VN>: <nội dung>" — gom về 1 dòng, cắt ngắn cho dễ đọc. Luôn bắt
+// đầu bằng chữ nên không bao giờ bị Sheets hiểu nhầm là công thức (=...)
+// dù ghi bằng USER_ENTERED.
+function formatErrorForSheet(message) {
+  const ts = new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh', hour12: false })
+  const text = String(message || 'Lỗi không xác định').replace(/\s+/g, ' ').trim()
+  const body = text.length > MAX_ERROR_LEN ? text.slice(0, MAX_ERROR_LEN - 1) + '…' : text
+  return `LỖI ${ts}: ${body}`
+}
+
+// Đăng bài lỗi: G = 'error', H (fb_video_id) = nội dung lỗi, I (reel_link) = rỗng.
+// KHÔNG dùng updateRowStatusForChannel vì hàm đó dựng reel_link từ cột ID.
+async function writeRowErrorForChannel(channel, rowIndex, message) {
+  const sheets = await getSheetsClient()
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: channel.sheetId,
+    range: `${channel.sheetTab}!G${rowIndex}:I${rowIndex}`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: [['error', formatErrorForSheet(message), '']] },
+  })
+}
+
+// Comment lỗi: chỉ ghi K (comment_id) = nội dung lỗi, giữ nguyên status
+// 'posted' (video vẫn đã đăng). Cột K khác rỗng nên fetchCommentReady...
+// sẽ KHÔNG tự thử lại — muốn comment lại thì xoá ô K.
+async function writeCommentErrorForChannel(channel, rowIndex, message) {
+  const sheets = await getSheetsClient()
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: channel.sheetId,
+    range: `${channel.sheetTab}!K${rowIndex}`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: [[formatErrorForSheet(message)]] },
+  })
+}
+
 // Lấy các dòng đã đăng xong (status=posted), có link Facebook sẵn sàng
 // (cột I) và có nội dung bình luận đầu tiên (cột J) nhưng CHƯA bình luận
 // (cột K comment_id còn rỗng) — tránh bình luận lặp lại ở lượt quét sau.
@@ -148,4 +186,7 @@ module.exports = {
   updateRowStatusForChannel,
   fetchCommentReadyRowsForChannel,
   updateRowCommentForChannel,
+  writeRowErrorForChannel,
+  writeCommentErrorForChannel,
+  formatErrorForSheet,
 }

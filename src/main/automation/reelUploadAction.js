@@ -424,7 +424,13 @@ class ReelUploadAction extends BaseFacebookAction {
     })
     this.log(`Hiện có ${existingReelIds.length} reels: [${existingReelIds.slice(0, 3).join(', ')}...]`)
 
-    // Setup network interceptor để bắt video ID từ API response
+    // Setup network interceptor để bắt video ID từ API response — CHỈ dùng
+    // làm gợi ý dự phòng cuối cùng, KHÔNG dùng làm nguồn chính. Quét regex
+    // thô trên response GraphQL rất dễ bắt NHẦM id của post/video/comment
+    // khác không liên quan gì đến Reel vừa đăng (đã từng xảy ra — id bắt
+    // được không khớp video nào cả). Nguồn đáng tin cậy là refresh trang
+    // Reels rồi so sánh trực tiếp với danh sách reel thật của kênh, thực
+    // hiện SAU KHI đã chờ đủ waitAfterPublishMin như cấu hình — xem bên dưới.
     let networkVideoId = null
     const responseHandler = async (response) => {
       try {
@@ -449,9 +455,9 @@ class ReelUploadAction extends BaseFacebookAction {
           ]
           for (const pattern of patterns) {
             const m = text.match(pattern)
-            if (m && m[1] && !existingReelIds.includes(m[1])) {
+            if (m && m[1] && !existingReelIds.includes(m[1]) && !networkVideoId) {
               networkVideoId = m[1]
-              this.log(`✓ Bắt được video ID mới từ network: ${networkVideoId}`, 'ok')
+              this.log(`(dự phòng) Bắt được 1 ID nghi ngờ từ network: ${networkVideoId} — chưa xác nhận, sẽ ưu tiên kết quả refresh`, 'info')
               return
             }
           }
@@ -497,27 +503,19 @@ class ReelUploadAction extends BaseFacebookAction {
       await clickButtonByText(page, ['Đăng', 'Publish', 'Share'])
     }
 
-    // Chờ network ID (tối đa 15s)
-    this.log('Chờ video ID từ network response...')
-    for (let i = 0; i < 30 && !networkVideoId; i++) {
-      await sleep(500)
-    }
-    page.off('response', responseHandler)
-
-    if (networkVideoId) {
-      this.log(`Video ID từ network: ${networkVideoId}`, 'ok')
-      const link = `https://www.facebook.com/reel/${networkVideoId}`
-      this.log(`📎 Link video: ${link}`, 'ok')
-      return networkVideoId
-    }
-
-    // Fallback: Refresh trang Reels nhiều lần để tìm video mới nhất
-    this.log('Network không bắt được ID — thử refresh trang Reels để tìm...', 'warn')
-
+    // LUÔN chờ đủ thời gian đã cấu hình trước khi xác nhận ID — đây là
+    // thời gian để Facebook xử lý xong Reel vừa đăng và cập nhật vào danh
+    // sách Reels thật. Trước đây nếu network bắt được 1 id "nhanh" (vài
+    // giây) thì return NGAY, bỏ qua hẳn bước chờ + refresh xác nhận này —
+    // đó chính là lý do nhận nhầm id không thuộc video nào.
     if (this.delay.waitAfterPublishMin > 0) {
-      this.log(`Chờ ${this.delay.waitAfterPublishMin} phút trước khi bắt đầu refresh tìm link...`)
+      this.log(`Chờ ${this.delay.waitAfterPublishMin} phút trước khi refresh xác nhận video ID...`)
       await sleep(this.delay.waitAfterPublishMin * 60000)
     }
+
+    // Refresh trang Reels để xác nhận — NGUỒN CHÍNH, đáng tin cậy hơn
+    // network vì so sánh trực tiếp với danh sách reel thật của kênh.
+    this.log('Refresh trang Reels để xác nhận video ID...')
 
     let realVideoId = null
     const maxRefresh = this.delay.refreshAttempts || 5
@@ -553,6 +551,13 @@ class ReelUploadAction extends BaseFacebookAction {
       }
 
       this.log(`[Refresh ${attempt}] Chưa thấy video mới, thử lại...`, 'warn')
+    }
+
+    page.off('response', responseHandler)
+
+    if (!realVideoId && networkVideoId) {
+      this.log(`Refresh không xác nhận được — dùng tạm ID nghi ngờ từ network: ${networkVideoId} (CHƯA CHẮC CHẮN, nên kiểm tra thủ công)`, 'warn')
+      realVideoId = networkVideoId
     }
 
     if (!realVideoId) {

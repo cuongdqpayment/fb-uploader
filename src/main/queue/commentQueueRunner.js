@@ -12,7 +12,7 @@ const store = require('../store')
 const { sendLog, sendStatus } = require('../logger')
 const { getMainWindow } = require('../windowState')
 const { sleep } = require('../utils/sleep')
-const { fetchCommentReadyRowsForChannel, updateRowCommentForChannel } = require('../services/sheetsService')
+const { fetchCommentReadyRowsForChannel, updateRowCommentForChannel, writeCommentErrorForChannel } = require('../services/sheetsService')
 const { launchBrowser } = require('../browser/browserManager')
 const { ACTION_TYPES, createAction } = require('../automation/actionRegistry')
 
@@ -92,6 +92,16 @@ async function runCommentQueue(targetChannelId = null) {
             })
           } catch (e) {
             sendLog(`[${channel.name}] ✗ Lỗi bình luận ${row.reel_link}: ${e.message}`, 'error')
+            // Ghi lỗi vào cột K (comment_id) để theo dõi. Bỏ qua nếu người
+            // dùng vừa bấm Dừng (lỗi do bị ngắt, không phải lỗi thật) — ghi vào
+            // sẽ khoá việc tự thử lại bình luận dòng này.
+            if (isRunning) {
+              try {
+                await writeCommentErrorForChannel(channel, row.rowIndex, e.message)
+              } catch (we) {
+                sendLog(`[${channel.name}] ⚠ Không ghi được lỗi vào Sheet (dòng ${row.rowIndex}): ${we.message}`, 'warn')
+              }
+            }
             getMainWindow()?.webContents.send('comment:error', {
               channelId: channel.id,
               rowIndex: row.rowIndex,

@@ -21,6 +21,7 @@ export default function SettingsPage() {
           pageUrl: cfg.facebookPageUrl || '',
           videoBaseDir: cfg.videoBaseDir || '',
           skipCopyrightCheck: false,
+          dateFormatVN: true,
         }]
       }
       setCfg(cfg)
@@ -52,6 +53,7 @@ export default function SettingsPage() {
       pageUrl: '',
       videoBaseDir: '',
       skipCopyrightCheck: false,
+      dateFormatVN: true,
     }
     const updated = [...(cfg.channels || []), newCh]
     setCfg(prev => ({ ...prev, channels: updated }))
@@ -452,6 +454,24 @@ export default function SettingsPage() {
               <input type="text" value={activeChannel.sheetTab}
                 onChange={e => setChannel(activeChannel.id, 'sheetTab', e.target.value)}
                 placeholder="upload_facebook" />
+            </div>
+            <div className="divider" />
+            <div className="toggle-row">
+              <div className="toggle-info">
+                <div className="toggle-name">Ngày giờ trong Sheet theo kiểu Việt Nam (D/M/YYYY)</div>
+                <div className="toggle-desc">
+                  Tick nếu cột <code>scheduled_at</code> của Sheet này hiển thị ngày/tháng/năm
+                  (VD <code>01/10/2026 4:30:00</code> = ngày 1 tháng 10). Bỏ tick nếu Sheet dùng
+                  kiểu Mỹ tháng/ngày/năm (M/D/YYYY). Định dạng <code>YYYY-MM-DD HH:mm:ss</code> luôn
+                  được hiểu đúng. App <b>không tự đoán</b>; dòng nào không đọc được ngày giờ theo
+                  lựa chọn này sẽ bị bỏ qua và báo trong log.
+                </div>
+              </div>
+              <label className="switch">
+                <input type="checkbox" checked={activeChannel.dateFormatVN !== false}
+                  onChange={e => setChannel(activeChannel.id, 'dateFormatVN', e.target.checked)} />
+                <span className="slider-track" />
+              </label>
             </div>
           </div>
 
