@@ -182,28 +182,31 @@ class CommentAction extends BaseFacebookAction {
         }
       } catch (_) {}
     }
-    this.page.on('response', responseHandler)
+    const page = this.page
+    page.on('response', responseHandler)
+    // Remove the listener on every path (error/timeout/stop) — the tab is reused
+    try {
+      this.log('Click "Đăng bình luận"...')
+      const clicked = await page.evaluate((label) => {
+        const el = document.querySelector(`[aria-label="${label}"][role="button"]`)
+        if (!el) return false
+        if (el.getAttribute('aria-disabled') === 'true') return false
+        el.scrollIntoView({ behavior: 'instant', block: 'center' })
+        el.click()
+        return true
+      }, SEND_BUTTON_LABEL)
 
-    this.log('Click "Đăng bình luận"...')
-    const clicked = await this.page.evaluate((label) => {
-      const el = document.querySelector(`[aria-label="${label}"][role="button"]`)
-      if (!el) return false
-      if (el.getAttribute('aria-disabled') === 'true') return false
-      el.scrollIntoView({ behavior: 'instant', block: 'center' })
-      el.click()
-      return true
-    }, SEND_BUTTON_LABEL)
+      if (!clicked) {
+        throw new Error('Không click được nút "Đăng bình luận"')
+      }
+      this.log('Đã click "Đăng bình luận" ✓', 'ok')
 
-    if (!clicked) {
-      this.page.off('response', responseHandler)
-      throw new Error('Không click được nút "Đăng bình luận"')
+      for (let i = 0; i < 20 && !networkCommentId; i++) {
+        await sleep(500)
+      }
+    } finally {
+      page.off('response', responseHandler)
     }
-    this.log('Đã click "Đăng bình luận" ✓', 'ok')
-
-    for (let i = 0; i < 20 && !networkCommentId; i++) {
-      await sleep(500)
-    }
-    this.page.off('response', responseHandler)
 
     if (networkCommentId) return networkCommentId
 

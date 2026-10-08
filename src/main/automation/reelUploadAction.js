@@ -465,95 +465,98 @@ class ReelUploadAction extends BaseFacebookAction {
       } catch (_) {}
     }
     page.on('response', responseHandler)
-
-    // Click "Đăng" — dùng rightmost span để tránh nhầm "Lưu" [Lưu][Đăng]
-    // Facebook không dùng role="button" cho nút Đăng nên cần tìm theo vị trí
-    this.log('Click nút "Đăng"...')
-    const dangClicked = await page.evaluate(() => {
-      const allSpans = [...document.querySelectorAll('span')]
-      const dangSpans = allSpans.filter(s => {
-        const t = s.textContent.trim()
-        return t === 'Đăng' || t === 'Publish' || t === 'Share'
-      })
-      if (dangSpans.length === 0) return false
-
-      // Sort theo left DESC → span nằm xa nhất bên phải = nút "Đăng"
-      dangSpans.sort((a, b) =>
-        b.getBoundingClientRect().left - a.getBoundingClientRect().left
-      )
-      const span = dangSpans[0]
-
-      span.scrollIntoView({ behavior: 'instant', block: 'center' })
-      span.click()
-
-      let el = span.parentElement
-      for (let i = 0; i < 8; i++) {
-        if (!el) break
-        const style = window.getComputedStyle(el)
-        if (style.cursor === 'pointer') { el.click(); break }
-        el = el.parentElement
-      }
-      return true
-    })
-
-    if (dangClicked) {
-      this.log('Đã click nút "Đăng" (JS rightmost) ✓', 'ok')
-    } else {
-      this.log('Fallback: dùng clickButtonByText...', 'warn')
-      await clickButtonByText(page, ['Đăng', 'Publish', 'Share'])
-    }
-
-    // LUÔN chờ đủ thời gian đã cấu hình trước khi xác nhận ID — đây là
-    // thời gian để Facebook xử lý xong Reel vừa đăng và cập nhật vào danh
-    // sách Reels thật. Trước đây nếu network bắt được 1 id "nhanh" (vài
-    // giây) thì return NGAY, bỏ qua hẳn bước chờ + refresh xác nhận này —
-    // đó chính là lý do nhận nhầm id không thuộc video nào.
-    if (this.delay.waitAfterPublishMin > 0) {
-      this.log(`Chờ ${this.delay.waitAfterPublishMin} phút trước khi refresh xác nhận video ID...`)
-      await sleep(this.delay.waitAfterPublishMin * 60000)
-    }
-
-    // Refresh trang Reels để xác nhận — NGUỒN CHÍNH, đáng tin cậy hơn
-    // network vì so sánh trực tiếp với danh sách reel thật của kênh.
-    this.log('Refresh trang Reels để xác nhận video ID...')
-
+    // Listener must be removed on every path (error/timeout/stop), otherwise
+    // it stays attached to the reused Facebook tab forever
     let realVideoId = null
-    const maxRefresh = this.delay.refreshAttempts || 5
-    const refreshInterval = this.delay.refreshInterval || 30000
+    try {
+      // Click "Đăng" — dùng rightmost span để tránh nhầm "Lưu" [Lưu][Đăng]
+      // Facebook không dùng role="button" cho nút Đăng nên cần tìm theo vị trí
+      this.log('Click nút "Đăng"...')
+      const dangClicked = await page.evaluate(() => {
+        const allSpans = [...document.querySelectorAll('span')]
+        const dangSpans = allSpans.filter(s => {
+          const t = s.textContent.trim()
+          return t === 'Đăng' || t === 'Publish' || t === 'Share'
+        })
+        if (dangSpans.length === 0) return false
 
-    for (let attempt = 1; attempt <= maxRefresh; attempt++) {
-      this.log(`[Refresh ${attempt}/${maxRefresh}] Chờ ${refreshInterval / 1000}s...`)
-      await sleep(refreshInterval)
+        // Sort theo left DESC → span nằm xa nhất bên phải = nút "Đăng"
+        dangSpans.sort((a, b) =>
+          b.getBoundingClientRect().left - a.getBoundingClientRect().left
+        )
+        const span = dangSpans[0]
 
-      this.log(`[Refresh ${attempt}/${maxRefresh}] Reload trang Reels...`)
-      await page.goto(reelsUrl, { waitUntil: 'networkidle2', timeout: 30000 })
-        .catch(() => page.reload({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {}))
-      await sleep(3000)
+        span.scrollIntoView({ behavior: 'instant', block: 'center' })
+        span.click()
 
-      // Scan tất cả reel ID trên trang
-      const currentIds = await page.evaluate(() => {
-        const links = [...document.querySelectorAll('a[href*="/reel/"]')]
-        return links.map(l => {
-          const m = l.href.match(/\/reel\/(\d{10,})/)
-          return m ? m[1] : null
-        }).filter(Boolean)
+        let el = span.parentElement
+        for (let i = 0; i < 8; i++) {
+          if (!el) break
+          const style = window.getComputedStyle(el)
+          if (style.cursor === 'pointer') { el.click(); break }
+          el = el.parentElement
+        }
+        return true
       })
 
-      this.log(`[Refresh ${attempt}] Tìm thấy ${currentIds.length} reels`)
-
-      // Tìm ID mới (không có trong snapshot ban đầu)
-      const newIds = currentIds.filter(id => !existingReelIds.includes(id))
-      if (newIds.length > 0) {
-        realVideoId = newIds[0]
-        this.log(`✓ Tìm được ${newIds.length} video mới: ${newIds.join(', ')}`, 'ok')
-        this.log(`Chọn ID mới nhất: ${realVideoId}`, 'ok')
-        break
+      if (dangClicked) {
+        this.log('Đã click nút "Đăng" (JS rightmost) ✓', 'ok')
+      } else {
+        this.log('Fallback: dùng clickButtonByText...', 'warn')
+        await clickButtonByText(page, ['Đăng', 'Publish', 'Share'])
       }
 
-      this.log(`[Refresh ${attempt}] Chưa thấy video mới, thử lại...`, 'warn')
-    }
+      // LUÔN chờ đủ thời gian đã cấu hình trước khi xác nhận ID — đây là
+      // thời gian để Facebook xử lý xong Reel vừa đăng và cập nhật vào danh
+      // sách Reels thật. Trước đây nếu network bắt được 1 id "nhanh" (vài
+      // giây) thì return NGAY, bỏ qua hẳn bước chờ + refresh xác nhận này —
+      // đó chính là lý do nhận nhầm id không thuộc video nào.
+      if (this.delay.waitAfterPublishMin > 0) {
+        this.log(`Chờ ${this.delay.waitAfterPublishMin} phút trước khi refresh xác nhận video ID...`)
+        await sleep(this.delay.waitAfterPublishMin * 60000)
+      }
 
-    page.off('response', responseHandler)
+      // Refresh trang Reels để xác nhận — NGUỒN CHÍNH, đáng tin cậy hơn
+      // network vì so sánh trực tiếp với danh sách reel thật của kênh.
+      this.log('Refresh trang Reels để xác nhận video ID...')
+
+      const maxRefresh = this.delay.refreshAttempts || 5
+      const refreshInterval = this.delay.refreshInterval || 30000
+
+      for (let attempt = 1; attempt <= maxRefresh; attempt++) {
+        this.log(`[Refresh ${attempt}/${maxRefresh}] Chờ ${refreshInterval / 1000}s...`)
+        await sleep(refreshInterval)
+
+        this.log(`[Refresh ${attempt}/${maxRefresh}] Reload trang Reels...`)
+        await page.goto(reelsUrl, { waitUntil: 'networkidle2', timeout: 30000 })
+          .catch(() => page.reload({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {}))
+        await sleep(3000)
+
+        // Scan tất cả reel ID trên trang
+        const currentIds = await page.evaluate(() => {
+          const links = [...document.querySelectorAll('a[href*="/reel/"]')]
+          return links.map(l => {
+            const m = l.href.match(/\/reel\/(\d{10,})/)
+            return m ? m[1] : null
+          }).filter(Boolean)
+        })
+
+        this.log(`[Refresh ${attempt}] Tìm thấy ${currentIds.length} reels`)
+
+        // Tìm ID mới (không có trong snapshot ban đầu)
+        const newIds = currentIds.filter(id => !existingReelIds.includes(id))
+        if (newIds.length > 0) {
+          realVideoId = newIds[0]
+          this.log(`✓ Tìm được ${newIds.length} video mới: ${newIds.join(', ')}`, 'ok')
+          this.log(`Chọn ID mới nhất: ${realVideoId}`, 'ok')
+          break
+        }
+
+        this.log(`[Refresh ${attempt}] Chưa thấy video mới, thử lại...`, 'warn')
+      }
+    } finally {
+      page.off('response', responseHandler)
+    }
 
     if (!realVideoId && networkVideoId) {
       this.log(`Refresh không xác nhận được — dùng tạm ID nghi ngờ từ network: ${networkVideoId} (CHƯA CHẮC CHẮN, nên kiểm tra thủ công)`, 'warn')

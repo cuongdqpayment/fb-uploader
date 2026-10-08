@@ -14,11 +14,13 @@ const { getMainWindow } = require('../windowState')
 const { sleep } = require('../utils/sleep')
 const { parseScheduledAt } = require('../utils/dateTime')
 const { fetchPendingRowsForChannel, updateRowStatusForChannel, writeRowErrorForChannel } = require('../services/sheetsService')
-const { launchBrowser } = require('../browser/browserManager')
+const { acquireBrowser, releaseBrowser, getBrowser } = require('../browser/browserConnection')
 const { ACTION_TYPES, createAction } = require('../automation/actionRegistry')
 
 let isRunning = false
-let browser = null
+// Owner key of the run currently holding the shared CDP connection
+let currentOwner = null
+let runSeq = 0
 
 function getIsRunning() {
   return isRunning
@@ -26,17 +28,11 @@ function getIsRunning() {
 
 async function stopRun() {
   isRunning = false
-  if (browser) {
-    await browser.close().catch(() => {})
-    browser = null
-  }
+  // Release (not close!) the CDP connection: if no other queue holds it,
+  // this disconnects and interrupts the in-flight action. Chrome stays open.
+  if (currentOwner) await releaseBrowser(currentOwner)
   sendStatus('idle')
   sendLog('Đã dừng upload', 'warn')
-}
-
-// Gọi khi app thoát (before-quit) — đóng Chrome đang giữ nếu có
-async function closeBrowserOnQuit() {
-  if (browser) await browser.close().catch(() => {})
 }
 
 async function runUploadQueue(force = false, targetChannelId = null) {
@@ -56,8 +52,9 @@ async function runUploadQueue(force = false, targetChannelId = null) {
     return
   }
 
+  const owner = currentOwner = `upload#${++runSeq}`
   try {
-    browser = await launchBrowser()
+    await acquireBrowser(owner)
     sendLog('Đã kết nối Chrome ✓', 'ok')
 
     for (const channel of activeChannels) {
@@ -124,7 +121,7 @@ async function runUploadQueue(force = false, targetChannelId = null) {
           })
 
           try {
-            const fbVideoId = await createAction(ACTION_TYPES.REEL_UPLOAD, { browser, channel, row }).run()
+            const fbVideoId = await createAction(ACTION_TYPES.REEL_UPLOAD, { browser: await getBrowser(), channel, row }).run()
             await updateRowStatusForChannel(channel, row.rowIndex, 'posted', fbVideoId)
             sendLog(`[${channel.name}] ✓ Đã đăng: ${row.file_name}`, 'ok')
             getMainWindow()?.webContents.send('row:done', {
@@ -170,6 +167,10 @@ async function runUploadQueue(force = false, targetChannelId = null) {
     sendLog('Chrome vẫn mở — kiểm tra kết quả trên Facebook', 'info')
   } catch (e) {
     sendLog(`Lỗi nghiêm trọng: ${e.message}`, 'error')
+  } finally {
+    // Always give the connection back, even on error/stop, so idle = 0 connections
+    await releaseBrowser(owner)
+    if (currentOwner === owner) currentOwner = null
   }
 
   isRunning = false
@@ -177,4 +178,4 @@ async function runUploadQueue(force = false, targetChannelId = null) {
   sendLog('Hoàn tất tất cả kênh.', 'ok')
 }
 
-module.exports = { runUploadQueue, getIsRunning, stopRun, closeBrowserOnQuit }
+module.exports = { runUploadQueue, getIsRunning, stopRun }

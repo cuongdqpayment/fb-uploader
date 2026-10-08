@@ -9,8 +9,7 @@ const path = require('path')
 const { setMainWindow, getMainWindow } = require('./windowState')
 const { registerIpcHandlers } = require('./ipc/registerIpcHandlers')
 const schedulerService = require('./services/schedulerService')
-const queueRunner = require('./queue/uploadQueueRunner')
-const commentQueueRunner = require('./queue/commentQueueRunner')
+const browserConnection = require('./browser/browserConnection')
 
 // ─── Window ──────────────────────────────────────────────────
 function createWindow() {
@@ -48,14 +47,18 @@ app.whenReady().then(() => {
 
   // Auto-restore scheduler nếu trước đó đã bật
   schedulerService.restoreSchedulerIfEnabled()
+
+  // Periodic leak diagnostics (every 10 min): connection state + page count
+  browserConnection.startDiagnostics()
 })
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', async () => {
-  await queueRunner.closeBrowserOnQuit()
-  await commentQueueRunner.closeBrowserOnQuit()
+app.on('before-quit', () => {
   schedulerService.stopCronTimer()
+  browserConnection.stopDiagnostics()
+  // Disconnect only — never close the user's Chrome on port 9222
+  browserConnection.disconnectBrowser()
 })

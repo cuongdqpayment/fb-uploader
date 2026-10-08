@@ -13,11 +13,13 @@ const { sendLog, sendStatus } = require('../logger')
 const { getMainWindow } = require('../windowState')
 const { sleep } = require('../utils/sleep')
 const { fetchCommentReadyRowsForChannel, updateRowCommentForChannel, writeCommentErrorForChannel } = require('../services/sheetsService')
-const { launchBrowser } = require('../browser/browserManager')
+const { acquireBrowser, releaseBrowser, getBrowser } = require('../browser/browserConnection')
 const { ACTION_TYPES, createAction } = require('../automation/actionRegistry')
 
 let isRunning = false
-let browser = null
+// Owner key of the run currently holding the shared CDP connection
+let currentOwner = null
+let runSeq = 0
 
 function getIsRunning() {
   return isRunning
@@ -25,17 +27,11 @@ function getIsRunning() {
 
 async function stopRun() {
   isRunning = false
-  if (browser) {
-    await browser.close().catch(() => {})
-    browser = null
-  }
+  // Release (not close!) the CDP connection: if no other queue holds it,
+  // this disconnects and interrupts the in-flight action. Chrome stays open.
+  if (currentOwner) await releaseBrowser(currentOwner)
   sendStatus('idle')
   sendLog('Đã dừng bình luận', 'warn')
-}
-
-// Gọi khi app thoát (before-quit) — đóng Chrome đang giữ nếu có
-async function closeBrowserOnQuit() {
-  if (browser) await browser.close().catch(() => {})
 }
 
 async function runCommentQueue(targetChannelId = null) {
@@ -55,8 +51,9 @@ async function runCommentQueue(targetChannelId = null) {
     return
   }
 
+  const owner = currentOwner = `comment#${++runSeq}`
   try {
-    browser = await launchBrowser()
+    await acquireBrowser(owner)
     sendLog('Đã kết nối Chrome ✓', 'ok')
 
     for (const channel of activeChannels) {
@@ -82,7 +79,7 @@ async function runCommentQueue(targetChannelId = null) {
           })
 
           try {
-            const commentId = await createAction(ACTION_TYPES.COMMENT, { browser, channel, row }).run()
+            const commentId = await createAction(ACTION_TYPES.COMMENT, { browser: await getBrowser(), channel, row }).run()
             await updateRowCommentForChannel(channel, row.rowIndex, 'commented', commentId || '')
             sendLog(`[${channel.name}] ✓ Đã bình luận${commentId ? ` (id=${commentId})` : ' (không rõ ID)'}`, 'ok')
             getMainWindow()?.webContents.send('comment:done', {
@@ -127,6 +124,10 @@ async function runCommentQueue(targetChannelId = null) {
     }
   } catch (e) {
     sendLog(`Lỗi nghiêm trọng: ${e.message}`, 'error')
+  } finally {
+    // Always give the connection back, even on error/stop, so idle = 0 connections
+    await releaseBrowser(owner)
+    if (currentOwner === owner) currentOwner = null
   }
 
   isRunning = false
@@ -134,4 +135,4 @@ async function runCommentQueue(targetChannelId = null) {
   sendLog('Hoàn tất bình luận tất cả kênh.', 'ok')
 }
 
-module.exports = { runCommentQueue, getIsRunning, stopRun, closeBrowserOnQuit }
+module.exports = { runCommentQueue, getIsRunning, stopRun }
